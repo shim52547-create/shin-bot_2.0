@@ -103,8 +103,16 @@ module.exports = {
       const chosen = videoFormats.find(f => f.hasAudio !== false) || videoFormats[0];
 
       // Bước 4: tải file về temp rồi gửi (stream trực tiếp từ URL, không cần lưu cả vào RAM)
+      // QUAN TRỌNG: googlevideo.com sẽ trả 403 nếu thiếu User-Agent/Referer giống trình duyệt thật.
       const writer = fs.createWriteStream(videoPath);
-      const downloadRes = await axios.get(chosen.url, { responseType: "stream" });
+      const downloadRes = await axios.get(chosen.url, {
+        responseType: "stream",
+        timeout: 60000,
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+          "Referer": "https://www.youtube.com/"
+        }
+      });
       await new Promise((resolve, reject) => {
         downloadRes.data.pipe(writer);
         downloadRes.data.on("error", reject);
@@ -134,11 +142,16 @@ module.exports = {
         messageID
       );
     } catch (err) {
-      console.error("[ytb] error:", err?.response?.data || err.message || err);
       const status = err?.response?.status;
-      const msg = status === 401 || status === 403
-        ? "❌ RAPIDAPI_KEY không hợp lệ hoặc đã hết hạn/hết quota. Kiểm tra lại key trên RapidAPI."
-        : "❌ Tải hoặc gửi video thất bại. Thử lại sau hoặc báo admin kiểm tra log để xem lỗi cụ thể.";
+      // Chỉ log status + message ngắn gọn, KHÔNG log err.response.data khi responseType là "stream"
+      // (data lúc đó là object stream/socket lồng nhau rất lớn, log ra sẽ tràn cả console).
+      console.error("[ytb] error:", status ? `HTTP ${status}` : (err.code || err.message || String(err)));
+      let msg = "❌ Tải hoặc gửi video thất bại. Thử lại sau hoặc báo admin kiểm tra log để xem lỗi cụ thể.";
+      if (status === 401 || status === 403) {
+        msg = "❌ Không tải được video (link bị từ chối/hết hạn hoặc RAPIDAPI_KEY không hợp lệ). Thử lại lệnh xem có được không.";
+      } else if (err.code === "ECONNABORTED") {
+        msg = "❌ Tải video quá lâu (timeout). Thử lại hoặc chọn video ngắn hơn.";
+      }
       await api.sendMessage(msg, threadID, messageID);
     } finally {
       fs.remove(videoPath).catch(() => {});
