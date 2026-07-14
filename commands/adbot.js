@@ -49,7 +49,7 @@ module.exports = {
       `👑 CHỦ SỞ HỮU BOT 👑\n\n` +
       `😚 Tên: ${name}\n` +
       `🐧 UID: ${targetID}\n` +
-      `🐧 Hiện đang thực hiện NVQS vui lòng chỉ tag người điều hành\n` +
+      `🇻🇳 Hiện đang thực hiện NVQS vui lòng chỉ tag người điều hành\n` +
       ownerNote +
       (otherLines ? `\n🛡️ Admin điều hành khác:\n${otherLines}\n` : "") +
       `\n🤖 Bot: ${global.config.BOT_NAME}`;
