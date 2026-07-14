@@ -26,6 +26,22 @@ module.exports = function ({ api }) {
       const threadData = Threads.get(threadID);
       const prefix = threadData.prefix || global.config.PREFIX;
 
+      // Tin nhắn là reply -> kiểm tra xem có đang chờ reply cho lệnh nào không (vd: help, sing)
+      if (event.type === "message_reply" && event.messageReply && global.client.handleReply.length > 0) {
+        const waiting = global.client.handleReply.find(h => h.messageID === event.messageReply.messageID);
+        if (waiting) {
+          const command = global.client.commands.get(waiting.name);
+          if (command && typeof command.handleReply === "function") {
+            try {
+              await command.handleReply({ api, event, args: body.split(/\s+/), Threads, Users, handleReply: waiting });
+            } catch (err) {
+              logger.error(`Lỗi handleReply "${waiting.name}": ${err.message}`, "HANDLER");
+            }
+          }
+          return;
+        }
+      }
+
       if (!body.startsWith(prefix)) {
         // Không phải lệnh có prefix -> vẫn cho các lệnh có onChat (vd: game bài cào) xử lý tin nhắn thường
         for (const command of global.client.commands.values()) {

@@ -10,7 +10,8 @@ global.utils = require("./utils/func");
 global.client = {
   commands: new Map(),
   events: new Map(),
-  timeStart: Date.now()
+  timeStart: Date.now(),
+  handleReply: [] // hàng đợi chờ reply cho các lệnh dạng "reply số/lựa chọn" (vd: help, sing)
 };
 
 // ==== Nạp toàn bộ lệnh trong thư mục /commands ====
