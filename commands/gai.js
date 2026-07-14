@@ -16,8 +16,8 @@ module.exports = {
     run: async function ({ api, event }) {
         const { threadID, messageID } = event;
         
-        // Đường dẫn tới thư mục chứa ảnh gái xinh của bạn
-        const dirPath = "D:\\work\\MiraiBot-Clean\\assets\\images\\gai";
+        // Đường dẫn tới thư mục chứa ảnh gái xinh của bạn (tự động trỏ đúng theo project, chạy được cả local lẫn server)
+        const dirPath = path.join(__dirname, "..", "assets", "images", "gai");
 
         try {
             // Kiểm tra xem thư mục có tồn tại không
