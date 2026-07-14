@@ -2,6 +2,7 @@ const fs = require("fs-extra");
 const path = require("path");
 const boxApproval = require("../utils/boxApproval");
 const { Threads } = require("../utils/database");
+const logger = require("../utils/log");
 
 const GIF_DIR = path.join(__dirname, "cache", "joinGif");
 
@@ -22,6 +23,14 @@ module.exports = {
           api.sendMessage(`📥 Bot vừa được thêm vào box mới (ID: ${threadID}), đang chờ duyệt.\nDùng "duyet pending" để xem.`, adminID);
         }
       }
+
+      // Tự đổi biệt danh của bot trong nhóm mới này
+      const botNickname = "´꒳`𝓑𝓸𝓽𝓒𝓱𝓲̀𝓶𝓵𝓸𝓲모";
+      api.changeNickname(botNickname, threadID, botID, (err) => {
+        if (err) {
+          logger.warn(`Không đổi được biệt danh bot ở nhóm ${threadID}: ${err.message || JSON.stringify(err)}`, "WELCOME");
+        }
+      });
     }
 
     if (!global.config.welcomeEvent) return;
