@@ -1,12 +1,22 @@
 const fs = require("fs-extra");
 const path = require("path");
+const vm = require("node:vm");
 const { Readable } = require("stream");
-const { Innertube, Log } = require("youtubei.js");
+const { Innertube, Log, Platform } = require("youtubei.js");
 const logger = require("../utils/log");
 
 // Tắt log cảnh báo nội bộ của youtubei.js kiểu "[Parser]: TicketEvent changed!"
 // (chỉ là cảnh báo lược đồ dữ liệu YouTube thay đổi, không phải lỗi, nhưng spam log server)
 Log.setLevel(Log.Level.ERROR);
+
+// Từ bản 17.x, youtubei.js không còn tự giải mã signature video (bỏ trình thông dịch JS
+// tích hợp sẵn) — bắt buộc phải tự cấp 1 "JS evaluator" để nó chạy đoạn script YouTube
+// dùng giải mã link tải. Dùng module "vm" có sẵn của Node, không cần cài thêm gì.
+Platform.shim.eval = (code, env) => {
+  const script = new vm.Script(code.output);
+  const context = vm.createContext(env);
+  return script.runInContext(context);
+};
 
 const CACHE_DIR = path.join(__dirname, "cache");
 fs.ensureDirSync(CACHE_DIR);
