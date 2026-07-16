@@ -35,10 +35,10 @@ const MAX_DURATION = 10 * 60; // 10 phút — chặn video quá dài
 // Response thật trả về: { title, description, author, lengthSeconds, viewCount,
 // thumbnail: [{url,...}], ownerChannelName, publishDate, ... }
 async function getVideoInfo(videoId) {
-  // TODO: sửa path/param đúng theo tab "Params" của endpoint "Get Video Information"
-  const res = await fetch(`https://${RAPIDAPI_HOST}/info/${videoId}`, {
-    headers: rapidApiHeaders(),
-  });
+  const url = new URL(`https://${RAPIDAPI_HOST}/get-video-info/${videoId}`);
+  url.searchParams.set("response_mode", "default");
+
+  const res = await fetch(url, { headers: rapidApiHeaders() });
   if (!res.ok) {
     throw new Error(`Lấy thông tin video thất bại — HTTP ${res.status}`);
   }
