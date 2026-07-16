@@ -103,7 +103,7 @@ async function downloadToFile(yt, info, filePath) {
     throw new Error("Video này không có định dạng video+audio (mp4 ghép sẵn) nào khả dụng.");
   }
 
-  const url = format.decipher(yt.session.player);
+  const url = await format.decipher(yt.session.player);
 
   // Tự fetch thủ công thay vì dùng info.download() — để lấy được status code THẬT
   // và nội dung lỗi (thường googlevideo trả về XML/text giải thích lý do) khi bị từ chối,
