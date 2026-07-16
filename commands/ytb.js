@@ -1,287 +1,233 @@
 const fs = require("fs-extra");
 const path = require("path");
-const vm = require("node:vm");
 const { Readable } = require("stream");
-const { Innertube, Log, Platform, UniversalCache } = require("youtubei.js");
-const { BG } = require("bgutils-js");
-const { JSDOM } = require("jsdom");
 const logger = require("../utils/log");
-
-// Tắt log cảnh báo nội bộ của youtubei.js kiểu "[Parser]: TicketEvent changed!"
-// (chỉ là cảnh báo lược đồ dữ liệu YouTube thay đổi, không phải lỗi, nhưng spam log server)
-Log.setLevel(Log.Level.ERROR);
-
-// Từ bản 17.x, youtubei.js không còn tự giải mã signature video (bỏ trình thông dịch JS
-// tích hợp sẵn) — bắt buộc phải tự cấp 1 "JS evaluator" để nó chạy đoạn script YouTube
-// dùng giải mã link tải. Dùng module "vm" có sẵn của Node, không cần cài thêm gì.
-Platform.shim.eval = (code, env) => {
-  // Script của YouTube kết thúc bằng "return process(...)" ở ngoài cùng — phải bọc
-  // trong 1 hàm thì "return" mới hợp lệ (nếu không sẽ báo "Illegal return statement").
-  const script = new vm.Script(`(function(){\n${code.output}\n})()`);
-  const context = vm.createContext(env);
-  return script.runInContext(context);
-};
 
 const CACHE_DIR = path.join(__dirname, "cache");
 fs.ensureDirSync(CACHE_DIR);
 
 const MAX_SIZE = 25 * 1024 * 1024; // 25MB, giới hạn gửi file của Messenger
-const MAX_DURATION = 10 * 60; // 10 phút — chặn video quá dài
-const MAX_RESULTS_TO_TRY = 3; // nếu video đầu tiên lỗi, thử tiếp các kết quả sau
 
-// Client để thử lấy info/stream tải xuống. Giữ danh sách này để phòng trường hợp
-// một video cụ thể bị hạn chế theo client (ví dụ video nhạc bản quyền), nhưng thực tế
-// nếu IP server bị YouTube chặn ở mức "Sign in to confirm you're not a bot" thì đổi
-// client KHÔNG giải quyết được — phải dùng cookie (xem readCookie() bên dưới).
-const CLIENTS_TO_TRY = ["ANDROID", "IOS", "TV_EMBEDDED", "WEB"];
+// ==== Cấu hình RapidAPI ====
+// Đặt biến môi trường RAPIDAPI_KEY trên Render (Environment tab), giống cách
+// FB_APPSTATE được đọc trong mirai.js. KHÔNG hardcode key vào code / .env commit lên GitHub.
+const RAPIDAPI_HOST = "youtube-mp3-audio-video-downloader.p.rapidapi.com";
+const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY;
 
-// ==== Đọc cookie YouTube (tài khoản Google đã đăng nhập) ====
-// Ưu tiên biến môi trường YT_COOKIE (dùng khi deploy Render/GitHub, giống cách FB_APPSTATE
-// được đọc trong mirai.js), nếu không có thì đọc file yt_cookie.txt ở thư mục gốc project.
-//
-// CÁCH LẤY COOKIE:
-// 1. Dùng 1 tài khoản Google PHỤ (không dùng tài khoản chính) để tránh rủi ro bị khoá.
-// 2. Đăng nhập youtube.com trên trình duyệt bằng tài khoản đó.
-// 3. Dùng extension "Cookie-Editor" (Chrome/Firefox) trên tab youtube.com, chọn Export
-//    → "Header String" (dạng "SID=...; HSID=...; SSID=...; APISID=...; SAPISID=...; ...").
-// 4. Dán nguyên chuỗi đó vào biến môi trường YT_COOKIE trên Render (Environment tab),
-//    hoặc lưu vào file yt_cookie.txt (đã thêm vào .gitignore, KHÔNG được commit lên GitHub —
-//    ai có cookie này đăng nhập được vào tài khoản Google đó).
-function readCookie() {
-  if (process.env.YT_COOKIE && process.env.YT_COOKIE.trim()) {
-    return process.env.YT_COOKIE.trim();
-  }
-  const cookiePath = path.join(__dirname, "..", "yt_cookie.txt");
-  if (fs.existsSync(cookiePath)) {
-    const raw = fs.readFileSync(cookiePath, "utf8").trim();
-    if (raw) return raw;
-  }
-  return undefined;
-}
-
-// ==== Sinh PoToken (proof-of-origin token) ====
-// Từ giữa 2024, YouTube bắt buộc phải đính kèm PoToken hợp lệ trong request tải file
-// thật (googlevideo.com), nếu không sẽ bị trả về "403 Forbidden" NGAY CẢ KHI URL đã
-// decipher() đúng. Đây là lý do gây lỗi 403 đồng loạt trên mọi video/mọi client, khác
-// với lỗi "Sign in to confirm..." (lỗi đó do thiếu cookie, còn lỗi 403 lúc TẢI là do
-// thiếu PoToken). Cookie (YT_COOKIE) và PoToken là hai cơ chế riêng biệt, không thay
-// thế cho nhau được.
-//
-// PoToken được sinh ra bằng cách giải 1 thử thách "BotGuard" (đoạn script YouTube dùng
-// để xác minh trình duyệt/máy chạy request là "thật"). BotGuard cần môi trường giống
-// trình duyệt (window/document) nên phải giả lập bằng "jsdom" khi chạy trên Node.
-const BG_REQUEST_KEY = "O43z0dpjhgX20SCx4KAo"; // key cố định thư viện bgutils-js dùng, không cần đổi
-
-async function generatePoToken(visitorData) {
-  const dom = new JSDOM();
-  Object.assign(globalThis, { window: dom.window, document: dom.window.document });
-
-  const bgConfig = {
-    fetch: (url, opts) => fetch(url, opts),
-    globalObj: globalThis,
-    identifier: visitorData,
-    requestKey: BG_REQUEST_KEY
+function rapidApiHeaders() {
+  return {
+    "x-rapidapi-key": RAPIDAPI_KEY,
+    "x-rapidapi-host": RAPIDAPI_HOST,
   };
-
-  const bgChallenge = await BG.Challenge.create(bgConfig);
-  if (!bgChallenge) throw new Error("Không lấy được BotGuard challenge.");
-
-  const interpreterJs =
-    bgChallenge.interpreterJavascript.privateDoNotAccessOrElseSafeScriptWrappedValue;
-  if (interpreterJs) {
-    new Function(interpreterJs)();
-  } else {
-    throw new Error("Không load được BotGuard VM (thiếu interpreterJavascript).");
-  }
-
-  const result = await BG.PoToken.generate({
-    program: bgChallenge.program,
-    globalName: bgChallenge.globalName,
-    bgConfig
-  });
-
-  if (!result?.poToken) throw new Error("BotGuard không trả về PoToken.");
-  return result.poToken;
 }
 
-let ytPromise = null;
-function getYt() {
-  if (!ytPromise) {
-    const cookie = readCookie();
-    if (!cookie) {
-      logger.warn(
-        "ytb: chưa cấu hình YT_COOKIE / yt_cookie.txt — nếu bị lỗi \"Sign in to confirm you're not a bot\" thì đây là lý do, xem hướng dẫn trong commands/ytb.js.",
-        "CMD"
-      );
-    }
+// Trích video ID từ 1 URL YouTube đầy đủ (nếu người dùng dán link thay vì từ khoá)
+function extractVideoId(text) {
+  const match = text.match(
+    /(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|shorts\/|embed\/))([a-zA-Z0-9_-]{11})/
+  );
+  return match ? match[1] : null;
+}
 
-    ytPromise = (async () => {
-      // Bước 1: tạo 1 session "mồi" chỉ để lấy visitorData (chưa cần player/cookie).
-      // PoToken phải được sinh RA SAU KHI có visitorData, vì nó gắn liền (bound) với
-      // đúng visitorData đó — không thể sinh trước rồi gán bừa vào session khác.
-      let poToken, visitorData;
-      try {
-        const probe = await Innertube.create({ retrieve_player: false });
-        visitorData = probe.session.context.client.visitorData;
-        poToken = await generatePoToken(visitorData);
-        logger.success("ytb: đã sinh PoToken thành công.", "CMD");
-      } catch (err) {
-        logger.warn(
-          `ytb: sinh PoToken thất bại (${err.message}) — video có thể vẫn bị lỗi 403 khi tải. Xem hướng dẫn PoToken trong commands/ytb.js.`,
-          "CMD"
+const MAX_DURATION = 10 * 60; // 10 phút — chặn video quá dài
+
+// ==== Lấy metadata video (endpoint "Get Video Information") ====
+// Response thật trả về: { title, description, author, lengthSeconds, viewCount,
+// thumbnail: [{url,...}], ownerChannelName, publishDate, ... }
+async function getVideoInfo(videoId) {
+  // TODO: sửa path/param đúng theo tab "Params" của endpoint "Get Video Information"
+  const res = await fetch(`https://${RAPIDAPI_HOST}/info/${videoId}`, {
+    headers: rapidApiHeaders(),
+  });
+  if (!res.ok) {
+    throw new Error(`Lấy thông tin video thất bại — HTTP ${res.status}`);
+  }
+  const data = await res.json();
+  return {
+    title: data.title || videoId,
+    author: data.author || data.ownerChannelName || "?",
+    durationSec: parseInt(data.lengthSeconds, 10) || 0,
+  };
+}
+
+// ==== Bước 1: tìm video theo từ khoá (dùng endpoint search sẵn có của app, nếu app
+// bạn có endpoint "Search Video" trong nhóm "Youtube API (Search, etc)") ====
+async function searchVideo(query) {
+  // TODO: thay URL/param đúng theo tab "Params"/"Code Snippets" của endpoint Search Video
+  // thực tế trong app RapidAPI của bạn — đây chỉ là khung mẫu.
+  const res = await fetch(
+    `https://${RAPIDAPI_HOST}/search/${encodeURIComponent(query)}`,
+    { headers: rapidApiHeaders() }
+  );
+  if (!res.ok) {
+    throw new Error(`Tìm kiếm thất bại — HTTP ${res.status}`);
+  }
+  const data = await res.json();
+  logger.info(`[ytb] search raw: ${JSON.stringify(data).slice(0, 300)}`, "CMD");
+  // Chuẩn hoá về { id, title } — SỬA lại field cho đúng response thật của bạn
+  const items = data.videos || data.results || data.items || [];
+  return items
+    .map((v) => ({
+      id: v.videoId || v.id || v.video_id,
+      title: v.title || v.name || v.id,
+    }))
+    .filter((v) => v.id);
+}
+
+// ==== Bước 2: lấy link tải trực tiếp cho 1 video ID (mp3) ====
+// Giả định response giống endpoint get_m4a_download_link (cùng nhà cung cấp):
+//   { comment, file: "<link tải, hiệu lực ~10 phút>", reserved_file: "<link mirror dự phòng>" }
+// TODO: xác nhận lại field thật sau khi Test Endpoint — nếu khác, sửa 2 dòng data.file/data.reserved_file bên dưới.
+const DOWNLOAD_ENDPOINT_PATH = "download-mp3";
+const DOWNLOAD_QUALITY = "low"; // "low" | "medium" | "high" tuỳ API hỗ trợ — chỉnh nếu muốn chất lượng khác
+
+async function getDirectDownloadUrl(videoId) {
+  const url = new URL(`https://${RAPIDAPI_HOST}/${DOWNLOAD_ENDPOINT_PATH}/${videoId}`);
+  url.searchParams.set("quality", DOWNLOAD_QUALITY);
+
+  const res = await fetch(url, { headers: rapidApiHeaders() });
+  if (!res.ok) {
+    let bodyPreview = "";
+    try {
+      bodyPreview = (await res.text()).slice(0, 300);
+    } catch (e) {}
+    throw new Error(`Lấy link tải thất bại — HTTP ${res.status} ${bodyPreview}`);
+  }
+  const data = await res.json();
+
+  const directUrl = data.file || data.reserved_file;
+  if (!directUrl) {
+    throw new Error(
+      `Không tìm thấy link tải trong response: ${JSON.stringify(data).slice(0, 300)}`
+    );
+  }
+
+  return { directUrl, reservedUrl: data.reserved_file };
+}
+
+// ==== Bước 3: tải file về từ link trực tiếp (thử link chính, rồi link mirror) ====
+async function downloadToFile(urls, filePath) {
+  const candidates = Array.isArray(urls) ? urls.filter(Boolean) : [urls];
+  let lastErr;
+
+  for (const url of candidates) {
+    try {
+      const res = await fetch(url);
+      if (!res.ok || !res.body) {
+        let bodyPreview = "";
+        try {
+          bodyPreview = (await res.text()).slice(0, 300).replace(/\s+/g, " ").trim();
+        } catch (e) {}
+        throw new Error(
+          `HTTP ${res.status} ${res.statusText || ""}${bodyPreview ? ` | ${bodyPreview}` : ""}`
         );
       }
 
-      // Bước 2: tạo session THẬT, truyền po_token + visitor_data ngay lúc khởi tạo
-      // (đây là 2 field chính thức youtubei.js hỗ trợ, không phải hack nội bộ).
-      return Innertube.create({
-        cookie,
-        cache: new UniversalCache(false),
-        po_token: poToken,
-        visitor_data: visitorData
+      await new Promise((resolve, reject) => {
+        const nodeStream = Readable.fromWeb(res.body);
+        const writeStream = fs.createWriteStream(filePath);
+        nodeStream.on("error", reject);
+        writeStream.on("error", reject);
+        writeStream.on("finish", resolve);
+        nodeStream.pipe(writeStream);
       });
-    })();
-  }
-  return ytPromise;
-}
 
-// Thử lấy VideoInfo lần lượt qua nhiều client, trả về info đầu tiên PLAYABLE.
-async function getPlayableInfo(yt, videoId) {
-  let lastErr;
-  for (const client of CLIENTS_TO_TRY) {
-    try {
-      const info = await yt.getInfo(videoId, { client });
-      const status = info?.playability_status?.status;
-      if (status && status !== "OK") {
-        lastErr = new Error(`[${client}] ${status}: ${info.playability_status?.reason || ""}`);
-        continue;
+      if (!fs.existsSync(filePath) || fs.statSync(filePath).size === 0) {
+        throw new Error("File tải về rỗng.");
       }
-      return info;
+      return; // thành công
     } catch (err) {
       lastErr = err;
+      fs.remove(filePath).catch(() => {});
     }
   }
-  throw lastErr || new Error("Không lấy được thông tin video.");
-}
-
-async function downloadToFile(yt, info, filePath) {
-  // Lấy format muxed (video+audio ghép sẵn) tốt nhất có thể. youtubei.js không có khái
-  // niệm "lowest" riêng cho loại muxed — nó chỉ tồn tại ở vài mức cố định (thường 360p/720p),
-  // nên không có gì để "fallback" thật sự — bỏ qua ý tưởng đó.
-  const format =
-    info.chooseFormat({ type: "video+audio", quality: "best", format: "mp4" }) ||
-    info.chooseFormat({ type: "video+audio" });
-
-  if (!format) {
-    throw new Error("Video này không có định dạng video+audio (mp4 ghép sẵn) nào khả dụng.");
-  }
-
-  const url = await format.decipher(yt.session.player);
-
-  // Tự fetch thủ công thay vì dùng info.download() — để lấy được status code THẬT
-  // và nội dung lỗi (thường googlevideo trả về XML/text giải thích lý do) khi bị từ chối,
-  // thay vì lỗi chung chung "non 2xx status code" mà youtubei.js ném ra.
-  const res = await fetch(url);
-  if (!res.ok || !res.body) {
-    let bodyPreview = "";
-    try {
-      bodyPreview = (await res.text()).slice(0, 300).replace(/\s+/g, " ").trim();
-    } catch (e) {
-      // bỏ qua nếu không đọc được body
-    }
-    throw new Error(`Tải trực tiếp thất bại — HTTP ${res.status} ${res.statusText || ""}${bodyPreview ? ` | ${bodyPreview}` : ""}`);
-  }
-
-  await new Promise((resolve, reject) => {
-    const nodeStream = Readable.fromWeb(res.body);
-    const writeStream = fs.createWriteStream(filePath);
-    nodeStream.on("error", reject);
-    writeStream.on("error", reject);
-    writeStream.on("finish", resolve);
-    nodeStream.pipe(writeStream);
-  });
-
-  if (!fs.existsSync(filePath) || fs.statSync(filePath).size === 0) {
-    throw new Error("File tải về rỗng — video này có thể không có luồng video+audio mp4 ghép sẵn.");
-  }
+  throw new Error(`Tải file thất bại (đã thử ${candidates.length} link) — ${lastErr?.message}`);
 }
 
 module.exports = {
   config: {
     name: "ytb",
     aliases: ["youtube", "yt"],
-    version: "1.2.0",
+    version: "2.0.0",
     role: 0,
-    description: "Tìm và gửi video YouTube theo từ khoá",
-    usage: "ytb <từ khoá>",
-    category: "Media"
+    description: "Tìm và gửi video/audio YouTube theo từ khoá (qua RapidAPI)",
+    usage: "ytb <từ khoá hoặc link YouTube>",
+    category: "Media",
   },
   run: async ({ api, event, args }) => {
     const { threadID, messageID, senderID } = event;
-
     const query = args.join(" ").trim();
+
     if (!query) {
-      return api.sendMessage("⚠️ Bạn phải nhập từ khoá cần tìm!\nCách dùng: ytb <từ khoá>", threadID, messageID);
+      return api.sendMessage(
+        "⚠️ Bạn phải nhập từ khoá hoặc link YouTube!\nCách dùng: ytb <từ khoá|link>",
+        threadID,
+        messageID
+      );
     }
 
-    const filePath = path.join(CACHE_DIR, `${threadID}-${senderID}.mp4`);
+    if (!RAPIDAPI_KEY) {
+      return api.sendMessage(
+        "❌ Chưa cấu hình RAPIDAPI_KEY (biến môi trường). Xem hướng dẫn trong commands/ytb.js.",
+        threadID,
+        messageID
+      );
+    }
+
+    const filePath = path.join(CACHE_DIR, `${threadID}-${senderID}.mp3`);
 
     try {
-      const yt = await getYt();
+      // Nếu người dùng dán thẳng link YouTube thì lấy ID luôn, khỏi search
+      let videoId = extractVideoId(query);
+      let title = null;
 
-      const search = await yt.search(query, { type: "video" });
-      const candidates = (search?.videos || []).filter(v => v?.id).slice(0, MAX_RESULTS_TO_TRY);
-
-      if (candidates.length === 0) {
-        return api.sendMessage(`❌ Không tìm thấy video nào cho "${query}".`, threadID, messageID);
+      if (!videoId) {
+        const candidates = await searchVideo(query);
+        if (candidates.length === 0) {
+          return api.sendMessage(`❌ Không tìm thấy video nào cho "${query}".`, threadID, messageID);
+        }
+        videoId = candidates[0].id;
+        title = candidates[0].title;
       }
 
-      api.sendMessage(`🔎 Tìm thấy: ${candidates[0].title?.text || candidates[0].id}\n⏳ Đang tải video, chờ chút nhé...`, threadID, messageID);
-
-      let lastErr;
-      for (const video of candidates) {
-        const title = video.title?.text || video.id;
-        const durationSec = video.duration?.seconds || 0;
-
-        if (durationSec > MAX_DURATION) {
-          lastErr = new Error(`"${title}" dài quá ${MAX_DURATION / 60} phút, bỏ qua.`);
-          continue;
-        }
-
-        try {
-          const info = await getPlayableInfo(yt, video.id);
-          await downloadToFile(yt, info, filePath);
-
-          if (fs.statSync(filePath).size > MAX_SIZE) {
-            fs.unlinkSync(filePath);
-            lastErr = new Error(`"${title}" vượt quá 25MB, không thể gửi qua Messenger.`);
-            continue;
-          }
-
-          return api.sendMessage(
-            {
-              body: `✅ ${title}\n👤 ${video.author?.name || "?"}\n🔗 https://youtu.be/${video.id}`,
-              attachment: fs.createReadStream(filePath)
-            },
-            threadID,
-            () => fs.unlink(filePath, () => {}),
-            messageID
-          );
-        } catch (err) {
-          logger.warn(`ytb: bỏ qua video ${video.id} (${title}): ${err.message}`, "CMD");
-          lastErr = err;
-          fs.remove(filePath).catch(() => {});
-        }
+      // Lấy metadata trước để check thời lượng + hiển thị tên/tác giả chuẩn
+      const info = await getVideoInfo(videoId);
+      if (info.durationSec > MAX_DURATION) {
+        return api.sendMessage(
+          `❌ "${info.title}" dài quá ${MAX_DURATION / 60} phút, bỏ qua.`,
+          threadID,
+          messageID
+        );
       }
 
-      const hint = readCookie()
-        ? ""
-        : "\n💡 Chưa cấu hình YT_COOKIE — xem hướng dẫn trong commands/ytb.js để hết lỗi này.";
-      throw new Error((lastErr?.message || "Không tải được video nào phù hợp.") + hint);
+      api.sendMessage(
+        `🔎 Tìm thấy: ${info.title}\n⏳ Đang lấy link tải, chờ chút nhé...`,
+        threadID,
+        messageID
+      );
+
+      // Link tải chỉ có hiệu lực ~10 phút — phải tải ngay sau khi lấy, không cache lại.
+      const { directUrl, reservedUrl } = await getDirectDownloadUrl(videoId);
+      await downloadToFile([directUrl, reservedUrl], filePath);
+
+      if (fs.statSync(filePath).size > MAX_SIZE) {
+        fs.unlinkSync(filePath);
+        throw new Error(`Vượt quá 25MB, không thể gửi qua Messenger.`);
+      }
+
+      return api.sendMessage(
+        {
+          body: `✅ ${info.title}\n👤 ${info.author}\n🔗 https://youtu.be/${videoId}`,
+          attachment: fs.createReadStream(filePath),
+        },
+        threadID,
+        () => fs.unlink(filePath, () => {}),
+        messageID
+      );
     } catch (err) {
       fs.remove(filePath).catch(() => {});
       logger.error(`Lỗi lệnh ytb: ${err.stack || err.message}`, "CMD");
       return api.sendMessage(`❌ Đã có lỗi khi tải video: ${err.message}`, threadID, messageID);
     }
-  }
+  },
 };
