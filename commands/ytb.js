@@ -2,7 +2,9 @@ const fs = require("fs-extra");
 const path = require("path");
 const vm = require("node:vm");
 const { Readable } = require("stream");
-const { Innertube, Log, Platform } = require("youtubei.js");
+const { Innertube, Log, Platform, UniversalCache } = require("youtubei.js");
+const { BG } = require("bgutils-js");
+const { JSDOM } = require("jsdom");
 const logger = require("../utils/log");
 
 // Tắt log cảnh báo nội bộ của youtubei.js kiểu "[Parser]: TicketEvent changed!"
@@ -57,6 +59,51 @@ function readCookie() {
   return undefined;
 }
 
+// ==== Sinh PoToken (proof-of-origin token) ====
+// Từ giữa 2024, YouTube bắt buộc phải đính kèm PoToken hợp lệ trong request tải file
+// thật (googlevideo.com), nếu không sẽ bị trả về "403 Forbidden" NGAY CẢ KHI URL đã
+// decipher() đúng. Đây là lý do gây lỗi 403 đồng loạt trên mọi video/mọi client, khác
+// với lỗi "Sign in to confirm..." (lỗi đó do thiếu cookie, còn lỗi 403 lúc TẢI là do
+// thiếu PoToken). Cookie (YT_COOKIE) và PoToken là hai cơ chế riêng biệt, không thay
+// thế cho nhau được.
+//
+// PoToken được sinh ra bằng cách giải 1 thử thách "BotGuard" (đoạn script YouTube dùng
+// để xác minh trình duyệt/máy chạy request là "thật"). BotGuard cần môi trường giống
+// trình duyệt (window/document) nên phải giả lập bằng "jsdom" khi chạy trên Node.
+const BG_REQUEST_KEY = "O43z0dpjhgX20SCx4KAo"; // key cố định thư viện bgutils-js dùng, không cần đổi
+
+async function generatePoToken(visitorData) {
+  const dom = new JSDOM();
+  Object.assign(globalThis, { window: dom.window, document: dom.window.document });
+
+  const bgConfig = {
+    fetch: (url, opts) => fetch(url, opts),
+    globalObj: globalThis,
+    identifier: visitorData,
+    requestKey: BG_REQUEST_KEY
+  };
+
+  const bgChallenge = await BG.Challenge.create(bgConfig);
+  if (!bgChallenge) throw new Error("Không lấy được BotGuard challenge.");
+
+  const interpreterJs =
+    bgChallenge.interpreterJavascript.privateDoNotAccessOrElseSafeScriptWrappedValue;
+  if (interpreterJs) {
+    new Function(interpreterJs)();
+  } else {
+    throw new Error("Không load được BotGuard VM (thiếu interpreterJavascript).");
+  }
+
+  const result = await BG.PoToken.generate({
+    program: bgChallenge.program,
+    globalName: bgChallenge.globalName,
+    bgConfig
+  });
+
+  if (!result?.poToken) throw new Error("BotGuard không trả về PoToken.");
+  return result.poToken;
+}
+
 let ytPromise = null;
 function getYt() {
   if (!ytPromise) {
@@ -67,7 +114,33 @@ function getYt() {
         "CMD"
       );
     }
-    ytPromise = Innertube.create({ cookie });
+
+    ytPromise = (async () => {
+      // Bước 1: tạo 1 session "mồi" chỉ để lấy visitorData (chưa cần player/cookie).
+      // PoToken phải được sinh RA SAU KHI có visitorData, vì nó gắn liền (bound) với
+      // đúng visitorData đó — không thể sinh trước rồi gán bừa vào session khác.
+      let poToken, visitorData;
+      try {
+        const probe = await Innertube.create({ retrieve_player: false });
+        visitorData = probe.session.context.client.visitorData;
+        poToken = await generatePoToken(visitorData);
+        logger.success("ytb: đã sinh PoToken thành công.", "CMD");
+      } catch (err) {
+        logger.warn(
+          `ytb: sinh PoToken thất bại (${err.message}) — video có thể vẫn bị lỗi 403 khi tải. Xem hướng dẫn PoToken trong commands/ytb.js.`,
+          "CMD"
+        );
+      }
+
+      // Bước 2: tạo session THẬT, truyền po_token + visitor_data ngay lúc khởi tạo
+      // (đây là 2 field chính thức youtubei.js hỗ trợ, không phải hack nội bộ).
+      return Innertube.create({
+        cookie,
+        cache: new UniversalCache(false),
+        po_token: poToken,
+        visitor_data: visitorData
+      });
+    })();
   }
   return ytPromise;
 }
