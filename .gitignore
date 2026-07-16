@@ -16,3 +16,4 @@ events/cache/*
 
 # .env local (nếu bạn tạo file .env khi chạy local với dotenv)
 .env
+yt_cookie.txt

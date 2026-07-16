@@ -15,14 +15,48 @@ const MAX_SIZE = 25 * 1024 * 1024; // 25MB, giới hạn gửi file của Messen
 const MAX_DURATION = 10 * 60; // 10 phút — chặn video quá dài
 const MAX_RESULTS_TO_TRY = 3; // nếu video đầu tiên lỗi, thử tiếp các kết quả sau
 
-// Thứ tự client để thử lấy info/stream tải xuống. "WEB" (mặc định) rất hay bị YouTube
-// trả về playability_status = LOGIN_REQUIRED khi chạy trên IP datacenter (Render, VPS...),
-// nên ưu tiên thử ANDROID/IOS/TV_EMBEDDED trước — các client này ít bị chặn kiểu này hơn.
+// Client để thử lấy info/stream tải xuống. Giữ danh sách này để phòng trường hợp
+// một video cụ thể bị hạn chế theo client (ví dụ video nhạc bản quyền), nhưng thực tế
+// nếu IP server bị YouTube chặn ở mức "Sign in to confirm you're not a bot" thì đổi
+// client KHÔNG giải quyết được — phải dùng cookie (xem readCookie() bên dưới).
 const CLIENTS_TO_TRY = ["ANDROID", "IOS", "TV_EMBEDDED", "WEB"];
+
+// ==== Đọc cookie YouTube (tài khoản Google đã đăng nhập) ====
+// Ưu tiên biến môi trường YT_COOKIE (dùng khi deploy Render/GitHub, giống cách FB_APPSTATE
+// được đọc trong mirai.js), nếu không có thì đọc file yt_cookie.txt ở thư mục gốc project.
+//
+// CÁCH LẤY COOKIE:
+// 1. Dùng 1 tài khoản Google PHỤ (không dùng tài khoản chính) để tránh rủi ro bị khoá.
+// 2. Đăng nhập youtube.com trên trình duyệt bằng tài khoản đó.
+// 3. Dùng extension "Cookie-Editor" (Chrome/Firefox) trên tab youtube.com, chọn Export
+//    → "Header String" (dạng "SID=...; HSID=...; SSID=...; APISID=...; SAPISID=...; ...").
+// 4. Dán nguyên chuỗi đó vào biến môi trường YT_COOKIE trên Render (Environment tab),
+//    hoặc lưu vào file yt_cookie.txt (đã thêm vào .gitignore, KHÔNG được commit lên GitHub —
+//    ai có cookie này đăng nhập được vào tài khoản Google đó).
+function readCookie() {
+  if (process.env.YT_COOKIE && process.env.YT_COOKIE.trim()) {
+    return process.env.YT_COOKIE.trim();
+  }
+  const cookiePath = path.join(__dirname, "..", "yt_cookie.txt");
+  if (fs.existsSync(cookiePath)) {
+    const raw = fs.readFileSync(cookiePath, "utf8").trim();
+    if (raw) return raw;
+  }
+  return undefined;
+}
 
 let ytPromise = null;
 function getYt() {
-  if (!ytPromise) ytPromise = Innertube.create();
+  if (!ytPromise) {
+    const cookie = readCookie();
+    if (!cookie) {
+      logger.warn(
+        "ytb: chưa cấu hình YT_COOKIE / yt_cookie.txt — nếu bị lỗi \"Sign in to confirm you're not a bot\" thì đây là lý do, xem hướng dẫn trong commands/ytb.js.",
+        "CMD"
+      );
+    }
+    ytPromise = Innertube.create({ cookie });
+  }
   return ytPromise;
 }
 
@@ -70,7 +104,7 @@ module.exports = {
   config: {
     name: "ytb",
     aliases: ["youtube", "yt"],
-    version: "1.1.0",
+    version: "1.2.0",
     role: 0,
     description: "Tìm và gửi video YouTube theo từ khoá",
     usage: "ytb <từ khoá>",
@@ -134,7 +168,10 @@ module.exports = {
         }
       }
 
-      throw lastErr || new Error("Không tải được video nào phù hợp.");
+      const hint = readCookie()
+        ? ""
+        : "\n💡 Chưa cấu hình YT_COOKIE — xem hướng dẫn trong commands/ytb.js để hết lỗi này.";
+      throw new Error((lastErr?.message || "Không tải được video nào phù hợp.") + hint);
     } catch (err) {
       fs.remove(filePath).catch(() => {});
       logger.error(`Lỗi lệnh ytb: ${err.stack || err.message}`, "CMD");
