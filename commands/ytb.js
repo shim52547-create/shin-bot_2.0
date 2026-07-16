@@ -74,74 +74,41 @@ async function searchVideo(query) {
     .filter((v) => v.id);
 }
 
-// ==== Bước 2: lấy link tải trực tiếp cho 1 video ID (mp3) ====
-// Giả định response giống endpoint get_m4a_download_link (cùng nhà cung cấp):
-//   { comment, file: "<link tải, hiệu lực ~10 phút>", reserved_file: "<link mirror dự phòng>" }
-// TODO: xác nhận lại field thật sau khi Test Endpoint — nếu khác, sửa 2 dòng data.file/data.reserved_file bên dưới.
+// ==== Bước 2+3: tải file MP3 trực tiếp ====
+// Endpoint download-mp3 trả THẲNG file mp3 (binary, header bắt đầu bằng "ID3"),
+// KHÔNG trả JSON chứa link như get_m4a_download_link — nên ghi thẳng response body ra file.
 const DOWNLOAD_ENDPOINT_PATH = "download-mp3";
 const DOWNLOAD_QUALITY = "low"; // "low" | "medium" | "high" tuỳ API hỗ trợ — chỉnh nếu muốn chất lượng khác
 
-async function getDirectDownloadUrl(videoId) {
+async function downloadMp3(videoId, filePath) {
   const url = new URL(`https://${RAPIDAPI_HOST}/${DOWNLOAD_ENDPOINT_PATH}/${videoId}`);
   url.searchParams.set("quality", DOWNLOAD_QUALITY);
 
   const res = await fetch(url, { headers: rapidApiHeaders() });
-  if (!res.ok) {
+  if (!res.ok || !res.body) {
     let bodyPreview = "";
     try {
-      bodyPreview = (await res.text()).slice(0, 300);
+      bodyPreview = (await res.text()).slice(0, 300).replace(/\s+/g, " ").trim();
     } catch (e) {}
-    throw new Error(`Lấy link tải thất bại — HTTP ${res.status} ${bodyPreview}`);
-  }
-  const data = await res.json();
-
-  const directUrl = data.file || data.reserved_file;
-  if (!directUrl) {
     throw new Error(
-      `Không tìm thấy link tải trong response: ${JSON.stringify(data).slice(0, 300)}`
+      `Tải mp3 thất bại — HTTP ${res.status} ${res.statusText || ""}${
+        bodyPreview ? ` | ${bodyPreview}` : ""
+      }`
     );
   }
 
-  return { directUrl, reservedUrl: data.reserved_file };
-}
+  await new Promise((resolve, reject) => {
+    const nodeStream = Readable.fromWeb(res.body);
+    const writeStream = fs.createWriteStream(filePath);
+    nodeStream.on("error", reject);
+    writeStream.on("error", reject);
+    writeStream.on("finish", resolve);
+    nodeStream.pipe(writeStream);
+  });
 
-// ==== Bước 3: tải file về từ link trực tiếp (thử link chính, rồi link mirror) ====
-async function downloadToFile(urls, filePath) {
-  const candidates = Array.isArray(urls) ? urls.filter(Boolean) : [urls];
-  let lastErr;
-
-  for (const url of candidates) {
-    try {
-      const res = await fetch(url);
-      if (!res.ok || !res.body) {
-        let bodyPreview = "";
-        try {
-          bodyPreview = (await res.text()).slice(0, 300).replace(/\s+/g, " ").trim();
-        } catch (e) {}
-        throw new Error(
-          `HTTP ${res.status} ${res.statusText || ""}${bodyPreview ? ` | ${bodyPreview}` : ""}`
-        );
-      }
-
-      await new Promise((resolve, reject) => {
-        const nodeStream = Readable.fromWeb(res.body);
-        const writeStream = fs.createWriteStream(filePath);
-        nodeStream.on("error", reject);
-        writeStream.on("error", reject);
-        writeStream.on("finish", resolve);
-        nodeStream.pipe(writeStream);
-      });
-
-      if (!fs.existsSync(filePath) || fs.statSync(filePath).size === 0) {
-        throw new Error("File tải về rỗng.");
-      }
-      return; // thành công
-    } catch (err) {
-      lastErr = err;
-      fs.remove(filePath).catch(() => {});
-    }
+  if (!fs.existsSync(filePath) || fs.statSync(filePath).size === 0) {
+    throw new Error("File tải về rỗng.");
   }
-  throw new Error(`Tải file thất bại (đã thử ${candidates.length} link) — ${lastErr?.message}`);
 }
 
 module.exports = {
@@ -206,9 +173,8 @@ module.exports = {
         messageID
       );
 
-      // Link tải chỉ có hiệu lực ~10 phút — phải tải ngay sau khi lấy, không cache lại.
-      const { directUrl, reservedUrl } = await getDirectDownloadUrl(videoId);
-      await downloadToFile([directUrl, reservedUrl], filePath);
+      // Tải trực tiếp — endpoint trả về file mp3 luôn, không qua bước lấy link riêng.
+      await downloadMp3(videoId, filePath);
 
       if (fs.statSync(filePath).size > MAX_SIZE) {
         fs.unlinkSync(filePath);
