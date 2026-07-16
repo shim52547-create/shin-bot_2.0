@@ -91,47 +91,46 @@ async function getPlayableInfo(yt, videoId) {
   throw lastErr || new Error("Không lấy được thông tin video.");
 }
 
-async function downloadToFile(info, filePath) {
-  // Thử "best" trước, nếu lỗi thì fallback "lowest" — đôi khi luồng chất lượng cao
-  // bị chặn/giới hạn riêng trong khi luồng thấp hơn vẫn tải được bình thường.
-  const qualitiesToTry = ["best", "lowest"];
-  let lastErr;
+async function downloadToFile(yt, info, filePath) {
+  // Lấy format muxed (video+audio ghép sẵn) tốt nhất có thể. youtubei.js không có khái
+  // niệm "lowest" riêng cho loại muxed — nó chỉ tồn tại ở vài mức cố định (thường 360p/720p),
+  // nên không có gì để "fallback" thật sự — bỏ qua ý tưởng đó.
+  const format =
+    info.chooseFormat({ type: "video+audio", quality: "best", format: "mp4" }) ||
+    info.chooseFormat({ type: "video+audio" });
 
-  for (const quality of qualitiesToTry) {
-    try {
-      const stream = await info.download({
-        type: "video+audio",
-        quality,
-        format: "mp4"
-      });
-
-      await new Promise((resolve, reject) => {
-        const nodeStream = Readable.fromWeb(stream);
-        const writeStream = fs.createWriteStream(filePath);
-        nodeStream.on("error", reject);
-        writeStream.on("error", reject);
-        writeStream.on("finish", resolve);
-        nodeStream.pipe(writeStream);
-      });
-
-      if (!fs.existsSync(filePath) || fs.statSync(filePath).size === 0) {
-        throw new Error("File tải về rỗng — video này có thể không có luồng video+audio mp4 ghép sẵn.");
-      }
-
-      return; // thành công, thoát luôn
-    } catch (err) {
-      // youtubei.js thường ném lỗi kiểu "The server responded with a non 2xx status code"
-      // mà không lộ status code thật — cố lấy thêm chi tiết nếu có để dễ chẩn đoán
-      // (403 = IP/quyền truy cập bị chặn, 404 = luồng không còn tồn tại, 429 = bị rate-limit...).
-      const statusInfo = err?.response?.status || err?.status || err?.code;
-      const detail = statusInfo ? ` (status: ${statusInfo})` : "";
-      logger.warn(`ytb: tải quality="${quality}" thất bại${detail}: ${err.message}`, "CMD");
-      lastErr = err;
-      fs.remove(filePath).catch(() => {});
-    }
+  if (!format) {
+    throw new Error("Video này không có định dạng video+audio (mp4 ghép sẵn) nào khả dụng.");
   }
 
-  throw lastErr || new Error("Không tải được video ở bất kỳ chất lượng nào.");
+  const url = format.decipher(yt.session.player);
+
+  // Tự fetch thủ công thay vì dùng info.download() — để lấy được status code THẬT
+  // và nội dung lỗi (thường googlevideo trả về XML/text giải thích lý do) khi bị từ chối,
+  // thay vì lỗi chung chung "non 2xx status code" mà youtubei.js ném ra.
+  const res = await fetch(url);
+  if (!res.ok || !res.body) {
+    let bodyPreview = "";
+    try {
+      bodyPreview = (await res.text()).slice(0, 300).replace(/\s+/g, " ").trim();
+    } catch (e) {
+      // bỏ qua nếu không đọc được body
+    }
+    throw new Error(`Tải trực tiếp thất bại — HTTP ${res.status} ${res.statusText || ""}${bodyPreview ? ` | ${bodyPreview}` : ""}`);
+  }
+
+  await new Promise((resolve, reject) => {
+    const nodeStream = Readable.fromWeb(res.body);
+    const writeStream = fs.createWriteStream(filePath);
+    nodeStream.on("error", reject);
+    writeStream.on("error", reject);
+    writeStream.on("finish", resolve);
+    nodeStream.pipe(writeStream);
+  });
+
+  if (!fs.existsSync(filePath) || fs.statSync(filePath).size === 0) {
+    throw new Error("File tải về rỗng — video này có thể không có luồng video+audio mp4 ghép sẵn.");
+  }
 }
 
 module.exports = {
@@ -178,7 +177,7 @@ module.exports = {
 
         try {
           const info = await getPlayableInfo(yt, video.id);
-          await downloadToFile(info, filePath);
+          await downloadToFile(yt, info, filePath);
 
           if (fs.statSync(filePath).size > MAX_SIZE) {
             fs.unlinkSync(filePath);
