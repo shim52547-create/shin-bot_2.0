@@ -13,7 +13,9 @@ Log.setLevel(Log.Level.ERROR);
 // tích hợp sẵn) — bắt buộc phải tự cấp 1 "JS evaluator" để nó chạy đoạn script YouTube
 // dùng giải mã link tải. Dùng module "vm" có sẵn của Node, không cần cài thêm gì.
 Platform.shim.eval = (code, env) => {
-  const script = new vm.Script(code.output);
+  // Script của YouTube kết thúc bằng "return process(...)" ở ngoài cùng — phải bọc
+  // trong 1 hàm thì "return" mới hợp lệ (nếu không sẽ báo "Illegal return statement").
+  const script = new vm.Script(`(function(){\n${code.output}\n})()`);
   const context = vm.createContext(env);
   return script.runInContext(context);
 };
