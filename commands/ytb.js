@@ -92,24 +92,46 @@ async function getPlayableInfo(yt, videoId) {
 }
 
 async function downloadToFile(info, filePath) {
-  const stream = await info.download({
-    type: "video+audio",
-    quality: "best",
-    format: "mp4"
-  });
+  // Thử "best" trước, nếu lỗi thì fallback "lowest" — đôi khi luồng chất lượng cao
+  // bị chặn/giới hạn riêng trong khi luồng thấp hơn vẫn tải được bình thường.
+  const qualitiesToTry = ["best", "lowest"];
+  let lastErr;
 
-  await new Promise((resolve, reject) => {
-    const nodeStream = Readable.fromWeb(stream);
-    const writeStream = fs.createWriteStream(filePath);
-    nodeStream.on("error", reject);
-    writeStream.on("error", reject);
-    writeStream.on("finish", resolve);
-    nodeStream.pipe(writeStream);
-  });
+  for (const quality of qualitiesToTry) {
+    try {
+      const stream = await info.download({
+        type: "video+audio",
+        quality,
+        format: "mp4"
+      });
 
-  if (!fs.existsSync(filePath) || fs.statSync(filePath).size === 0) {
-    throw new Error("File tải về rỗng — video này có thể không có luồng video+audio mp4 ghép sẵn.");
+      await new Promise((resolve, reject) => {
+        const nodeStream = Readable.fromWeb(stream);
+        const writeStream = fs.createWriteStream(filePath);
+        nodeStream.on("error", reject);
+        writeStream.on("error", reject);
+        writeStream.on("finish", resolve);
+        nodeStream.pipe(writeStream);
+      });
+
+      if (!fs.existsSync(filePath) || fs.statSync(filePath).size === 0) {
+        throw new Error("File tải về rỗng — video này có thể không có luồng video+audio mp4 ghép sẵn.");
+      }
+
+      return; // thành công, thoát luôn
+    } catch (err) {
+      // youtubei.js thường ném lỗi kiểu "The server responded with a non 2xx status code"
+      // mà không lộ status code thật — cố lấy thêm chi tiết nếu có để dễ chẩn đoán
+      // (403 = IP/quyền truy cập bị chặn, 404 = luồng không còn tồn tại, 429 = bị rate-limit...).
+      const statusInfo = err?.response?.status || err?.status || err?.code;
+      const detail = statusInfo ? ` (status: ${statusInfo})` : "";
+      logger.warn(`ytb: tải quality="${quality}" thất bại${detail}: ${err.message}`, "CMD");
+      lastErr = err;
+      fs.remove(filePath).catch(() => {});
+    }
   }
+
+  throw lastErr || new Error("Không tải được video ở bất kỳ chất lượng nào.");
 }
 
 module.exports = {

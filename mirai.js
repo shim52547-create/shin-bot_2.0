@@ -199,8 +199,18 @@ function start() {
       // MQTT của fca-unofficial có thể âm thầm rớt kết nối mà không báo lỗi gì cả
       // (bot vẫn hiện "READY" nhưng không nhận tin nhắn mới nữa).
       // Nên chủ động ngắt và kết nối lại định kỳ mỗi 1 giờ để phòng trường hợp này.
-      if (global.client.stopListening) global.client.stopListening();
-      global.client.stopListening = api.listenMqtt(mqttCallback);
+      // Lưu ý: listenMqtt() KHÔNG trả về hàm để dừng nghe — phải dùng api.stopListening()
+      // (method có sẵn trên chính object api). Gán nhầm giá trị trả về của listenMqtt()
+      // vào global.client.stopListening rồi gọi nó như hàm ở lần connectMqtt() kế tiếp
+      // chính là nguyên nhân gây crash "stopListening is not a function".
+      if (typeof api.stopListening === "function") {
+        try {
+          api.stopListening();
+        } catch (err) {
+          logger.warn(`Lỗi khi dừng MQTT cũ trước khi kết nối lại: ${err.message}`, "MQTT");
+        }
+      }
+      api.listenMqtt(mqttCallback);
       global.client.mqttTimer = setTimeout(connectMqtt, 60 * 60 * 1000);
       logger.success("Đã kết nối MQTT, bắt đầu lắng nghe tin nhắn.", "MQTT");
     }
