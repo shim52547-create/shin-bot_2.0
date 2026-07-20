@@ -2,7 +2,7 @@ const fs = require("fs-extra");
 const path = require("path");
 const moment = require("moment-timezone");
 
-const DATA_DIR = path.join(__dirname, "..", "data");
+const { DATA_DIR } = require("./dataDir");
 const COUNT_FILE = path.join(DATA_DIR, "messageCount.json");
 
 fs.ensureDirSync(DATA_DIR);

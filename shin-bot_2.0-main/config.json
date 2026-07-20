@@ -1,0 +1,25 @@
+{
+  "PREFIX": "!",
+  "BOT_NAME": "Bot by Shin",
+  "ADMIN_BOT": [
+    "100009355533612",
+    "100034778172330"
+  ],
+  "language": "vi",
+  "autoRestart": true,
+  "debug": true,
+  "FCAOption": {
+    "listenEvents": true,
+    "listenTyping": true,
+    "selfListen": false,
+    "updatePresence": true,
+    "forceLogin": true,
+    "online": true,
+    "autoMarkDelivery": false,
+    "autoMarkRead": false,
+    "autoReconnect": true,
+    "logLevel": "error"
+  },
+  "welcomeEvent": true,
+  "leaveEvent": true
+}

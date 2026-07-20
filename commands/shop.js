@@ -8,7 +8,7 @@ const MONEY_PER_EXP = 10; // 10 xu = 1 exp (đổi TIỀN sang EXP)
 const EXP_PER_MONEY = 5;  // 5 exp = 1 xu (đổi EXP sang TIỀN)
 
 // ==== Lưu lịch sử giao dịch, theo đúng convention của utils/currency.js, utils/database.js ====
-const DATA_DIR = path.join(__dirname, "..", "data");
+const { DATA_DIR } = require("../utils/dataDir");
 const HISTORY_FILE = path.join(DATA_DIR, "shop_history.json");
 
 fs.ensureDirSync(DATA_DIR);

@@ -1,7 +1,7 @@
 const fs = require("fs-extra");
 const path = require("path");
 
-const DATA_DIR = path.join(__dirname, "..", "data");
+const { DATA_DIR } = require("./dataDir");
 const MONEY_FILE = path.join(DATA_DIR, "money.json");
 const HISTORY_FILE = path.join(DATA_DIR, "money_history.json");
 const MAX_HISTORY = 20000; // giới hạn số bản ghi để file không phình to vô hạn

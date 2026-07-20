@@ -1,7 +1,7 @@
 const fs = require("fs-extra");
 const path = require("path");
 
-const DATA_DIR = path.join(__dirname, "..", "data");
+const { DATA_DIR } = require("./dataDir");
 const THREADS_FILE = path.join(DATA_DIR, "threads.json");
 const USERS_FILE = path.join(DATA_DIR, "users.json");
 

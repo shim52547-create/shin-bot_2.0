@@ -1,0 +1,19 @@
+node_modules/
+cookie.txt
+data/*.json
+npm-debug.log
+
+# Cache / file tạm - không cần đẩy lên GitHub
+commands/cache/*
+!commands/cache/.gitkeep
+data/cache/*
+!data/cache/.gitkeep
+data/temp/*
+!data/temp/.gitkeep
+events/cache/*
+!events/cache/.gitkeep
+*-player-script.js
+
+# .env local (nếu bạn tạo file .env khi chạy local với dotenv)
+.env
+yt_cookie.txt

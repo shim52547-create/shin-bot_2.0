@@ -1,7 +1,7 @@
 const fs = require("fs-extra");
 const path = require("path");
 
-const DATA_DIR = path.join(__dirname, "..", "data");
+const { DATA_DIR } = require("./dataDir");
 const APPROVED_FILE = path.join(DATA_DIR, "approvedThreads.json");
 const PENDING_FILE = path.join(DATA_DIR, "pendingThreads.json");
 
