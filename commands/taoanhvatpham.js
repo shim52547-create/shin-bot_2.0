@@ -30,6 +30,7 @@ const fs = require("fs-extra");
 const axios = require("axios");
 const logger = require("../utils/log");
 const { buildQueue, countTotalItems, countDone } = require("../utils/itemArtQueue");
+const MetaAiStore = require("../utils/metaAiStore");
 
 const WAIT_TIMEOUT_MS = 90 * 1000;      // chờ tối đa 90s cho mỗi lần Meta AI trả lời
 const MAX_RETRY_PER_ITEM = 2;           // thử lại tối đa 2 lần/vật phẩm nếu không thấy ảnh
@@ -63,11 +64,22 @@ function isImageAttachment(att) {
   return t.includes("photo") || t.includes("image") || t === "sticker" || t === "animated_image";
 }
 
-async function findMetaAI(api, threadID) {
-  const threadInfo = await api.getThreadInfo(threadID).catch(() => null);
-  const list = threadInfo?.userInfo || [];
-  const found = list.find(u => /meta\s*ai/i.test(u?.name || ""));
-  return found ? { id: found.id, name: found.name } : null;
+// Đọc field `mentions` của 1 tin nhắn ĐÃ tag Meta AI thật (người dùng tự gõ "@" chọn Meta AI)
+// để "học" ra ID thật của nó — vì Meta AI không phải thành viên nhóm nên không dò qua
+// getThreadInfo được (xem giải thích trong utils/metaAiStore.js).
+function tryLearnMetaFromMentions(event) {
+  const mentions = event.mentions || {};
+  for (const [id, tagText] of Object.entries(mentions)) {
+    if (/meta\s*ai/i.test(tagText || "")) {
+      const saved = MetaAiStore.get();
+      if (!saved || saved.id !== id) {
+        MetaAiStore.set(id, tagText);
+        logger.success(`[taoanhvatpham] Đã học được ID của Meta AI: ${id} (${tagText})`, "TAOANH");
+      }
+      return true;
+    }
+  }
+  return false;
 }
 
 async function sendCurrentItem(api) {
@@ -172,16 +184,19 @@ module.exports = {
 
     const limit = args[1] ? parseInt(args[1], 10) : 0;
 
-    const meta = await findMetaAI(api, threadID);
+    const meta = MetaAiStore.get();
     if (!meta) {
       return api.sendMessage(
-        `⚠️ Không tìm thấy "Meta AI" trong danh sách thành viên đoạn chat này.\n` +
-        `Hãy chắc chắn Meta AI đang có mặt/được bật trong đoạn chat này rồi thử lại.`,
+        `⚠️ Bot chưa "học" được ID thật của Meta AI.\n` +
+        `Meta AI không phải thành viên nhóm nên bot không tự dò ra ID được — cần 1 lần tag THẬT từ tay bạn:\n` +
+        `1) Gõ "@" trong ô chat này, chọn "Meta AI" trong menu gợi ý hiện ra (giống ảnh bạn vừa gửi).\n` +
+        `2) Gửi tin nhắn đó đi (nội dung gì cũng được, ví dụ "@Meta AI xin chào").\n` +
+        `3) Gõ lại "taoanhvatpham start" — bot sẽ tự học được ID ngay từ tin nhắn đó và chạy tiếp.`,
         threadID, messageID
       );
     }
 
-    const metaTag = `@${meta.name}`;
+    const metaTag = meta.tag;
     let queue = buildQueue(metaTag);
 
     if (!queue.length) {
