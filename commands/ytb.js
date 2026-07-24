@@ -1,8 +1,8 @@
 const fs = require("fs-extra");
 const path = require("path");
 
-// Dòng này_fix lỗi thiếu fetch cho Node.js dưới v18
-const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args)); 
+// Fix lỗi thiếu fetch cho Node.js dưới v18, tương thích với Node.js >= 18
+const fetch = (...args) => import('node-fetch').then(({default: fetch}) => fetch(...args));
 
 const { Readable } = require("stream");
 const logger = require("../utils/log");
@@ -10,8 +10,10 @@ const logger = require("../utils/log");
 const CACHE_DIR = path.join(__dirname, "cache");
 fs.ensureDirSync(CACHE_DIR);
 
-const MAX_SIZE = 25 * 1024 * 1024; // 25MB
+const MAX_SIZE = 25 * 1024 * 1024; // 25MB giới hạn gửi file của Messenger
+const MAX_DURATION = 10 * 60; // 10 phút
 
+// ==== Cấu hình RapidAPI ====
 const RAPIDAPI_HOST = "youtube-mp3-audio-video-downloader.p.rapidapi.com";
 const RAPIDAPI_KEY = process.env.RAPIDAPI_KEY;
 
@@ -22,6 +24,7 @@ function rapidApiHeaders() {
   };
 }
 
+// Trích video ID từ 1 URL YouTube đầy đủ
 function extractVideoId(text) {
   const match = text.match(
     /(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|shorts\/|embed\/))([a-zA-Z0-9_-]{11})/
@@ -29,8 +32,7 @@ function extractVideoId(text) {
   return match ? match[1] : null;
 }
 
-const MAX_DURATION = 10 * 60; // 10 phút
-
+// ==== Lấy metadata video ====
 async function getVideoInfo(videoId) {
   const url = new URL(`https://${RAPIDAPI_HOST}/get-video-info/${videoId}`);
   url.searchParams.set("response_mode", "default");
@@ -45,36 +47,28 @@ async function getVideoInfo(videoId) {
   };
 }
 
-// ⚠️ LƯU Ý: Bạn PHẢI vào RapidAPI sửa đúng URL trong hàm này nếu nó báo lỗi 404
-async function searchVideo(query) {
-  const res = await fetch(
-    `https://${RAPIDAPI_HOST}/search/${encodeURIComponent(query)}`, // <- Sửa dòng này theo docs của API
-    { headers: rapidApiHeaders() }
-  );
-  if (!res.ok) throw new Error(`Tìm kiếm thất bại — HTTP ${res.status}`);
-  const data = await res.json();
-  
-  const items = data.videos || data.results || data.items || [];
-  return items
-    .map((v) => ({
-      id: v.videoId || v.id || v.video_id,
-      title: v.title || v.name || v.id,
-    }))
-    .filter((v) => v.id);
-}
-
-// ⚠️ LƯU Ý: Bạn PHẢI vào RapidAPI sửa đúng URL trong hàm này nếu nó báo lỗi 404
+// ==== Tải file MP3 trực tiếp (Đã fix lỗi PassThrough) ====
 async function downloadMp3(videoId, filePath) {
-  const url = new URL(`https://${RAPIDAPI_HOST}/download-mp3/${videoId}`); // <- Sửa dòng này theo docs của API
+  const url = new URL(`https://${RAPIDAPI_HOST}/download-mp3/${videoId}`);
   url.searchParams.set("quality", "low");
 
   const res = await fetch(url, { headers: rapidApiHeaders() });
   if (!res.ok || !res.body) {
-    throw new Error(`Tải mp3 thất bại — HTTP ${res.status} (Kiểm tra lại Endpoint Download trên RapidAPI)`);
+    throw new Error(`Tải mp3 thất bại — HTTP ${res.status}. (Kiểm tra lại Endpoint Download trên RapidAPI)`);
   }
 
   await new Promise((resolve, reject) => {
-    const nodeStream = Readable.fromWeb(res.body);
+    let nodeStream;
+
+    // XỬ LÝ TƯƠNG THÍCH STREAM: Phân biệt node-fetch và fetch mặc định của Node.js
+    if (typeof res.body.pipe === 'function') {
+      // Đây là Stream của thư viện node-fetch -> Dùng trực tiếp
+      nodeStream = res.body;
+    } else {
+      // Đây là Web Stream mặc định của Node.js >= 18 -> Chuyển đổi
+      nodeStream = Readable.fromWeb(res.body);
+    }
+
     const writeStream = fs.createWriteStream(filePath);
     nodeStream.on("error", reject);
     writeStream.on("error", reject);
@@ -87,13 +81,14 @@ async function downloadMp3(videoId, filePath) {
   }
 }
 
+// ==== Khai báo lệnh cho Bot ====
 module.exports = {
   config: {
     name: "ytb",
     aliases: ["youtube", "yt"],
-    version: "2.0.1",
+    version: "2.0.3",
     role: 0,
-    description: "Tìm và gửi audio YouTube (Dùng link để đảm bảo hoạt động ổn định nhất)",
+    description: "Tải audio MP3 từ link YouTube",
     usage: "ytb <link YouTube>",
     category: "Media",
   },
@@ -102,54 +97,71 @@ module.exports = {
     const query = args.join(" ").trim();
 
     if (!query) {
-      return api.sendMessage("⚠️ Nhập từ khoá hoặc link YouTube!\nCách dùng: ytb <link YouTube>", threadID, messageID);
+      return api.sendMessage(
+        "⚠️ Bạn phải dán link YouTube vào!\nVí dụ: ytb https://youtu.be/dQw4w9WgXcQ",
+        threadID,
+        messageID
+      );
     }
 
     if (!RAPIDAPI_KEY) {
-      return api.sendMessage("❌ Bot chưa cấu hình RAPIDAPI_KEY. Admin vui lòng thêm biến môi trường!", threadID, messageID);
+      return api.sendMessage(
+        "❌ Bot chưa cấu hình RAPIDAPI_KEY. Admin vui lòng thêm biến môi trường!",
+        threadID,
+        messageID
+      );
+    }
+
+    // Bắt buộc người dùng gửi link
+    const videoId = extractVideoId(query);
+    if (!videoId) {
+      return api.sendMessage(
+        "❌ Link YouTube không hợp lệ. Vui lòng gửi đúng link video/shorts YouTube.",
+        threadID,
+        messageID
+      );
     }
 
     const filePath = path.join(CACHE_DIR, `${threadID}-${senderID}.mp3`);
 
     try {
-      let videoId = extractVideoId(query);
-      
-      // Nếu là link thì lấy ID luôn, nếu là text thì đi tìm kiếm
-      if (!videoId) {
-        api.sendMessage("🔍 Đang tìm kiếm video trên YouTube...", threadID, messageID);
-        const candidates = await searchVideo(query);
-        if (candidates.length === 0) return api.sendMessage(`❌ Không tìm thấy video nào cho "${query}".`, threadID, messageID);
-        videoId = candidates[0].id;
-      }
+      api.sendMessage(`⏳ Đang lấy thông tin và tải audio, chờ chút nhé...`, threadID, messageID);
 
-      api.sendMessage(`⏳ Đang lấy thông tin và tải audio...`, threadID, messageID);
-
+      // 1. Lấy thông tin
       const info = await getVideoInfo(videoId);
+      
       if (info.durationSec > MAX_DURATION) {
-        return api.sendMessage(`❌ "${info.title}" dài quá ${MAX_DURATION / 60} phút, bot không tải được.`, threadID, messageID);
+        return api.sendMessage(
+          `❌ "${info.title}" dài quá ${MAX_DURATION / 60} phút, bot không tải được.`,
+          threadID,
+          messageID
+        );
       }
 
+      // 2. Tải file
       await downloadMp3(videoId, filePath);
 
+      // 3. Kiểm tra dung lượng
       if (fs.statSync(filePath).size > MAX_SIZE) {
         fs.unlinkSync(filePath);
         throw new Error(`Vượt quá 25MB, Messenger không cho phép gửi.`);
       }
 
+      // 4. Gửi tin nhắn
       return api.sendMessage(
         {
           body: `✅ ${info.title}\n👤 ${info.author}\n🔗 https://youtu.be/${videoId}`,
           attachment: fs.createReadStream(filePath),
         },
         threadID,
-        () => fs.unlink(filePath, () => {}),
+        () => fs.unlink(filePath, () => {}), // Xóa file sau khi gửi xong
         messageID
       );
     } catch (err) {
+      // Xóa file rác nếu có lỗi xảy ra
       fs.remove(filePath).catch(() => {});
       logger.error(`Lỗi lệnh ytb: ${err.message}`, "CMD");
-      // In lỗi cụ thể ra tin nhắn để bạn dễ debug
-      return api.sendMessage(`❌ Lỗi: ${err.message}`, threadID, messageID);
+      return api.sendMessage(`❌ Đã có lỗi: ${err.message}`, threadID, messageID);
     }
   },
 };
