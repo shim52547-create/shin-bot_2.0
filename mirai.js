@@ -148,16 +148,26 @@ function scheduleDailyCountAnnouncement(api) {
 
 const RENT_WARN_DAYS = 3;
 
-// ==== Lên lịch job trừ ngày thuê nhóm lúc 0h hàng ngày (nhắc đóng tiền + tự out khi hết hạn) ====
-function scheduleDailyRentCheck(api) {
+// ==== HÀM XỬ LÝ TRỪ NGÀY, ĐỔI TÊN, TỰ OUT (Đã sửa lỗi cho Render) ====
+function scheduleRentJob(api) {
   function msUntilNextMidnight() {
     const now = moment.tz("Asia/Ho_Chi_Minh");
     const next = now.clone().add(1, "day").startOf("day");
     return next.diff(now);
   }
 
-  async function runRentTick() {
+  async function processRentTick() {
     try {
+      const today = moment.tz("Asia/Ho_Chi_Minh").format("YYYY-MM-DD");
+      const lastCheck = Rent.getLastCheckDate();
+      
+      // Tính số ngày cần trừ (nếu chưa có ngày check trước đó thì mặc định trừ 1)
+      let daysPassed = 1;
+      if (lastCheck) {
+        daysPassed = moment.tz(today, "Asia/Ho_Chi_Minh").diff(moment.tz(lastCheck, "Asia/Ho_Chi_Minh"), "days");
+        if (daysPassed <= 0) return; // Hôm nay đã xử lý rồi thì bỏ qua
+      }
+
       const threads = Rent.getAllThreads();
       let checked = 0, warned = 0, kicked = 0;
 
@@ -165,14 +175,25 @@ function scheduleDailyRentCheck(api) {
         if (!info.active) continue;
         checked++;
 
-        const daysLeft = (info.daysLeft || 0) - 1;
+        // Trừ số ngày đã trôi qua
+        const daysLeft = (info.daysLeft || 0) - daysPassed;
         Rent.setThread(threadID, { daysLeft });
 
+        // Lấy baseName (Tên gốc của bot). Nếu trước đó không lưu thì lấy trực tiếp từ biệt danh hiện tại
+        let baseName = info.baseName;
+        if (!baseName) {
+          baseName = await Rent.getBotBaseNickname(api, threadID);
+          Rent.setThread(threadID, { baseName }); // Lưu lại để lần sau không cần gọi API nữa
+        }
+
         if (daysLeft <= 0) {
-          // Hết hạn mà chưa đóng tiền -> thông báo rồi bot tự rời nhóm
+          // === HẾT HẠN ===
+          // Đổi tên bot về tên gốc trước khi out
+          try { await Rent.setBotNickname(api, threadID, baseName); } catch (e) {}
+
           try {
             await api.sendMessage(
-              `⛔ NHÓM "${info.baseName}" ĐÃ HẾT HẠN THUÊ.\n` +
+              `⛔ NHÓM "${baseName}" ĐÃ HẾT HẠN THUÊ.\n` +
               `Chưa thấy gia hạn nên bot sẽ tự rời khỏi nhóm này. Liên hệ admin bot/người điều hành để thuê lại.`,
               threadID
             );
@@ -184,62 +205,51 @@ function scheduleDailyRentCheck(api) {
             logger.warn(`Không tự out được khỏi nhóm ${threadID} (hết hạn thuê): ${e.message}`, "RENT_JOB");
           }
 
-          Rent.setThread(threadID, { active: false });
+          Rent.setThread(threadID, { active: false, daysLeft: 0 });
           kicked++;
           continue;
         }
 
-        // Vẫn còn hạn -> cập nhật lại biệt danh của BOT hiện số ngày còn lại (không đổi tên nhóm)
+        // === VẪN CÒN HẠN ===
+        // Cập nhật lại biệt danh của BOT hiện số ngày còn lại
         try {
-          await Rent.setBotNickname(api, threadID, Rent.buildNickname(info.baseName, daysLeft));
-        } catch (e) { /* bot có thể chưa có quyền đổi biệt danh trong nhóm */ }
+          await Rent.setBotNickname(api, threadID, Rent.buildNickname(baseName, daysLeft));
+        } catch (e) { /* bot có thể chưa có quyền đổi biệt danh */ }
 
-        // Sắp hết hạn (<= RENT_WARN_DAYS) -> nhắc đóng tiền, mỗi ngày nhắc 1 lần
+        // Sắp hết hạn (<= RENT_WARN_DAYS) -> nhắc đóng tiền
         if (daysLeft <= RENT_WARN_DAYS) {
           try {
             await api.sendMessage(
               `⏰ NHẮC HẠN THUÊ NHÓM\n———————————————\n` +
-              `Nhóm "${info.baseName}" chỉ còn ${daysLeft} ngày thuê.\n` +
+              `Nhóm "${baseName}" chỉ còn ${daysLeft} ngày thuê.\n` +
               `Vui lòng đóng tiền và gia hạn sớm để tránh bị bot tự out khi hết hạn.`,
               threadID
             );
             warned++;
-          } catch (e) { /* không gửi được, có thể nhóm đã chặn bot */ }
+          } catch (e) { /* không gửi được */ }
         }
       }
 
-      Rent.setLastCheckDate(moment.tz("Asia/Ho_Chi_Minh").format("YYYY-MM-DD"));
-      if (checked) logger.success(`Đã kiểm tra ${checked} nhóm thuê — nhắc hạn ${warned}, tự out ${kicked}.`, "RENT_JOB");
+      // Cập nhật ngày kiểm tra cuối cùng
+      Rent.setLastCheckDate(today);
+      if (checked) logger.success(`Đã xử lý ${checked} nhóm thuê (bù ${daysPassed} ngày) — nhắc hạn ${warned}, tự out ${kicked}.`, "RENT_JOB");
     } catch (err) {
-      logger.error(`Lỗi chạy job trừ ngày thuê nhóm: ${err.message}`, "RENT_JOB");
-    } finally {
-      setTimeout(runRentTick, msUntilNextMidnight());
+      logger.error(`Lỗi chạy job xử lý ngày thuê: ${err.message}`, "RENT_JOB");
     }
   }
 
-  setTimeout(runRentTick, msUntilNextMidnight());
-  logger.info("Đã lên lịch job trừ ngày thuê nhóm vào 0h hàng ngày.", "RENT_JOB");
+  // 1. CHẠY NGAY LẬP TỨC KHI BOT VỪA KHỞI ĐỘNG (Cực kỳ quan trọng cho Render)
+  processRentTick();
+
+  // 2. HẸN GIỜ CHẠY LẠI VÀO 0H00 NGÀY MAI
+  setTimeout(() => {
+    processRentTick();
+    scheduleRentJob(api); // Gọi đệ quy để tiếp tục hẹn giờ cho các ngày sau
+  }, msUntilNextMidnight());
+
+  logger.info("Đã thiết lập hệ thống tự động trừ ngày & đổi tên thuê nhóm.", "RENT_JOB");
 }
 
-
-function catchUpRentDays() {
-  const today = moment.tz("Asia/Ho_Chi_Minh").format("YYYY-MM-DD");
-  const lastCheck = Rent.getLastCheckDate();
-
-  if (lastCheck) {
-    const daysPassed = moment.tz(today, "Asia/Ho_Chi_Minh").diff(moment.tz(lastCheck, "Asia/Ho_Chi_Minh"), "days");
-    if (daysPassed > 0) {
-      const threads = Rent.getAllThreads();
-      for (const [threadID, info] of Object.entries(threads)) {
-        if (!info.active) continue;
-        Rent.setThread(threadID, { daysLeft: (info.daysLeft || 0) - daysPassed });
-      }
-      if (daysPassed > 0) logger.info(`Đã bù trừ ${daysPassed} ngày thuê nhóm do bot vừa khởi động lại.`, "RENT_JOB");
-    }
-  }
-
-  Rent.setLastCheckDate(today);
-}
 
 function start() {
   loadCommands();
@@ -303,8 +313,9 @@ function start() {
 
     connectMqtt();
     scheduleDailyCountAnnouncement(api);
-    catchUpRentDays();
-    scheduleDailyRentCheck(api);
+    
+    // GỌI HÀM MỚI ĐÃ SỬA LỖI
+    scheduleRentJob(api);
 
     logger.success(`Bot "${global.config.BOT_NAME}" đã sẵn sàng!`, "READY");
   });
