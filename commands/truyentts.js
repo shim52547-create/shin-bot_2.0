@@ -16,6 +16,10 @@ const TTS_RATE = "+15%";   // vd: "+15%" để đọc nhanh hơn, "-10%" để �
 const TTS_PITCH = "default";  // vd: "+5Hz"
 const TTS_VOLUME = "default";
 
+// Nếu IP server (vd Render) bị Microsoft giới hạn/chặn, có thể khai báo proxy
+// tại đây, ví dụ: "http://user:pass@host:port". Để trống ("") nếu không dùng.
+const TTS_PROXY = "";
+
 // File nhạc nền cố định dùng chung cho mọi truyện. Tự upload file mp3 và đặt
 // đúng đường dẫn này (tạo thư mục assets/audio nếu chưa có). Nếu file không
 // tồn tại, bot sẽ tự bỏ qua bước trộn nhạc và gửi voice TTS như bình thường.
@@ -102,12 +106,41 @@ function randomDelay(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
+// Trả về chuỗi mô tả lỗi đầy đủ nhất có thể lấy được từ 1 object lỗi bất kỳ,
+// kể cả khi đó không phải là một instance của Error chuẩn (vd object websocket
+// close event, plain object, string...). Dùng để log/debug thay vì chỉ in
+// err.message (có thể là undefined và không nói lên bản chất lỗi thật).
+function describeError(err) {
+  if (err === null || err === undefined) return String(err);
+  if (err instanceof Error) {
+    const extra = { ...err };
+    const extraStr = Object.keys(extra).length ? ` | extra=${safeStringify(extra)}` : "";
+    return `${err.name || "Error"}: ${err.message || "(không có message)"}${err.stack ? `\n${err.stack}` : ""}${extraStr}`;
+  }
+  if (typeof err === "object") {
+    return `[object không phải Error] ${safeStringify(err)}`;
+  }
+  return String(err);
+}
+
+function safeStringify(obj) {
+  try {
+    return JSON.stringify(obj, Object.getOwnPropertyNames(obj));
+  } catch (e) {
+    try {
+      return String(obj);
+    } catch (e2) {
+      return "(không thể stringify lỗi)";
+    }
+  }
+}
+
 // Gửi tin nhắn và trả về Promise<messageID> (hoặc null nếu gửi lỗi/không lấy được id).
 function sendTrackedMessage(api, body, threadID, messageID) {
   return new Promise((resolve) => {
     api.sendMessage(body, threadID, (err, info) => {
       if (err) {
-        console.error("Lỗi gửi tin nhắn trạng thái:", err.message || err);
+        console.error("Lỗi gửi tin nhắn trạng thái:", describeError(err));
         return resolve(null);
       }
       resolve(info && info.messageID ? info.messageID : null);
@@ -122,12 +155,12 @@ async function cleanupStatusMessages(api, ids) {
     try {
       await new Promise((resolve) => {
         api.unsendMessage(id, (err) => {
-          if (err) console.error(`Không thể xóa tin nhắn ${id}:`, err.message || err);
+          if (err) console.error(`Không thể xóa tin nhắn ${id}:`, describeError(err));
           resolve();
         });
       });
     } catch (e) {
-      console.error(`Lỗi khi xóa tin nhắn ${id}:`, e.message || e);
+      console.error(`Lỗi khi xóa tin nhắn ${id}:`, describeError(e));
     }
   }
 }
@@ -188,13 +221,16 @@ function splitTextForTTS(text, maxLen = 1500) {
 async function edgeTtsToBuffer(text) {
   const tmpDir = os.tmpdir();
   const tmpFile = path.join(tmpDir, `edge-tts-${Date.now()}-${Math.random().toString(36).slice(2)}.mp3`);
-  const tts = new EdgeTTS({
+  const ttsOptions = {
     voice: TTS_VOICE,
     lang: TTS_LANG,
     rate: TTS_RATE,
     pitch: TTS_PITCH,
     volume: TTS_VOLUME
-  });
+  };
+  if (TTS_PROXY) ttsOptions.proxy = TTS_PROXY;
+
+  const tts = new EdgeTTS(ttsOptions);
   try {
     await tts.ttsPromise(text, tmpFile);
     const buffer = await fs.promises.readFile(tmpFile);
@@ -278,9 +314,13 @@ async function fetchAndSendChapter({ api, threadID, messageID, storyName, slug, 
           buffer = await edgeTtsToBuffer(textChunks[i]);
           break; // thành công, thoát vòng retry
         } catch (err) {
-          console.error(`Đoạn ${i + 1} lỗi (lần ${attempt}/${MAX_RETRY}): ${err.message}`);
+          // Log đầy đủ lỗi thật (không chỉ err.message) để biết chính xác
+          // nguyên nhân: timeout, connection reset, rate-limit (429), v.v.
+          console.error(`Đoạn ${i + 1} lỗi (lần ${attempt}/${MAX_RETRY}): ${describeError(err)}`);
           if (attempt < MAX_RETRY) {
-            await sleep(randomDelay(1000, 2000));
+            // Backoff tăng dần theo số lần thử, thay vì delay cố định ngắn -
+            // giúp giảm khả năng bị Microsoft rate-limit khi IP server dùng chung.
+            await sleep(attempt * 3000 + randomDelay(500, 1500));
           }
         }
       }
@@ -292,13 +332,13 @@ async function fetchAndSendChapter({ api, threadID, messageID, storyName, slug, 
         failedIndexes.push(i + 1);
       }
 
-      // Edge-TTS ít bị chặn hơn Google Translate TTS, nhưng vẫn nghỉ ngắn cho an toàn
-      await sleep(randomDelay(200, 500));
+      // Nghỉ lâu hơn giữa các đoạn để giảm khả năng bị giới hạn tần suất kết nối.
+      await sleep(randomDelay(2000, 4000));
     }
 
     if (audioBuffers.every(b => b === null)) {
       await cleanupStatusMessages(api, statusMessageIDs);
-      await api.sendMessage(`❌ Không tải được âm thanh cho chương này (Edge-TTS có thể đang gặp sự cố). Vui lòng thử lại sau.`, threadID, replyID);
+      await api.sendMessage(`❌ Không tải được âm thanh cho chương này (Edge-TTS có thể đang gặp sự cố hoặc IP server đang bị giới hạn). Vui lòng thử lại sau.`, threadID, replyID);
       return "error";
     }
 
@@ -340,7 +380,7 @@ async function fetchAndSendChapter({ api, threadID, messageID, storyName, slug, 
         const mixedBuffer = await mixWithBackgroundMusic(mergedBuffer);
         if (mixedBuffer) outputBuffer = mixedBuffer;
       } catch (mixErr) {
-        console.error("Lỗi khi trộn nhạc nền TTS:", mixErr.message || mixErr);
+        console.error("Lỗi khi trộn nhạc nền TTS:", describeError(mixErr));
       }
 
       const finalStream = require("stream").Readable.from(outputBuffer);
@@ -357,8 +397,8 @@ async function fetchAndSendChapter({ api, threadID, messageID, storyName, slug, 
           attachment: finalStream
         }, threadID, (err) => {
           if (err) {
-            console.error(`Lỗi gửi file voice phần ${p + 1}:`, err.message || err);
-            api.sendMessage(`❌ Gửi file voice phần ${p + 1} thất bại: ${err.message || err}`, threadID, replyID);
+            console.error(`Lỗi gửi file voice phần ${p + 1}:`, describeError(err));
+            api.sendMessage(`❌ Gửi file voice phần ${p + 1} thất bại: ${err.message || describeError(err)}`, threadID, replyID);
           }
           resolve();
         });
@@ -378,7 +418,8 @@ async function fetchAndSendChapter({ api, threadID, messageID, storyName, slug, 
       await api.sendMessage(`❌ Không tìm thấy truyện hoặc chương này!`, threadID, replyID);
       return "not_found";
     }
-    await api.sendMessage(`❌ Lỗi khi xử lý: ${err.message}`, threadID, replyID);
+    console.error("Lỗi tổng thể khi xử lý chương:", describeError(err));
+    await api.sendMessage(`❌ Lỗi khi xử lý: ${err.message || describeError(err)}`, threadID, replyID);
     return "error";
   }
 }
@@ -434,7 +475,7 @@ function scheduleNextChapter(api, threadID, token) {
         autoSessions.delete(threadID);
       }
     } catch (err) {
-      console.error(`[truyentts] Lỗi không xác định trong scheduleNextChapter (thread ${threadID}):`, err);
+      console.error(`[truyentts] Lỗi không xác định trong scheduleNextChapter (thread ${threadID}):`, describeError(err));
       if (fakeCommandMsgID) {
         try { await cleanupStatusMessages(api, [fakeCommandMsgID]); } catch (_) {}
       }
