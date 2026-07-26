@@ -1,6 +1,64 @@
 const axios = require("axios");
 const { JSDOM } = require("jsdom");
 const { Readable } = require("stream"); // Fix lỗi Uint8Array
+const fs = require("fs");
+const os = require("os");
+const path = require("path");
+const ffmpegPath = require("@ffmpeg-installer/ffmpeg").path;
+const ffmpeg = require("fluent-ffmpeg");
+ffmpeg.setFfmpegPath(ffmpegPath);
+
+// File nhạc nền cố định dùng chung cho mọi truyện. Tự upload file mp3 và đặt
+// đúng đường dẫn này (tạo thư mục assets/audio nếu chưa có). Nếu file không
+// tồn tại, bot sẽ tự bỏ qua bước trộn nhạc và gửi voice TTS như bình thường.
+const BG_MUSIC_PATH = path.join(__dirname, "..", "assets", "audio", "truyentts-bg.mp3");
+const BG_MUSIC_VOLUME = 0.15; // 0.0 - 1.0, càng nhỏ nhạc nền càng nhỏ so với giọng đọc
+
+// Trộn 1 buffer giọng đọc (mp3) với nhạc nền (loop cho đủ độ dài), trả về
+// buffer mp3 đã trộn. Nếu không có file nhạc nền hoặc ffmpeg lỗi, trả về null
+// để nơi gọi tự fallback dùng buffer gốc (không có nhạc nền).
+function mixWithBackgroundMusic(narrationBuffer) {
+  return new Promise((resolve) => {
+    if (!fs.existsSync(BG_MUSIC_PATH)) return resolve(null);
+
+    const tmpDir = os.tmpdir();
+    const narrationPath = path.join(tmpDir, `tts-narration-${Date.now()}-${Math.random().toString(36).slice(2)}.mp3`);
+    const outputPath = path.join(tmpDir, `tts-mixed-${Date.now()}-${Math.random().toString(36).slice(2)}.mp3`);
+
+    fs.writeFile(narrationPath, narrationBuffer, (writeErr) => {
+      if (writeErr) return resolve(null);
+
+      ffmpeg()
+        .input(narrationPath)
+        .input(BG_MUSIC_PATH)
+        .inputOptions(["-stream_loop -1"]) // lặp nhạc nền vô hạn, ffmpeg tự cắt khi giọng đọc kết thúc
+        .complexFilter(
+          [
+            `[1:a]volume=${BG_MUSIC_VOLUME}[bg]`,
+            "[0:a][bg]amix=inputs=2:duration=first:dropout_transition=2[out]"
+          ],
+          "out"
+        )
+        .audioCodec("libmp3lame")
+        .format("mp3")
+        .on("error", () => {
+          // Dọn file tạm rồi báo lỗi (fallback) cho nơi gọi
+          fs.unlink(narrationPath, () => {});
+          fs.unlink(outputPath, () => {});
+          resolve(null);
+        })
+        .on("end", () => {
+          fs.readFile(outputPath, (readErr, mixedBuffer) => {
+            fs.unlink(narrationPath, () => {});
+            fs.unlink(outputPath, () => {});
+            if (readErr) return resolve(null);
+            resolve(mixedBuffer);
+          });
+        })
+        .save(outputPath);
+    });
+  });
+}
 
 function createSlug(str) {
   return str
@@ -232,7 +290,17 @@ module.exports = {
       for (let p = 0; p < parts.length; p++) {
         const mergedBuffer = Buffer.concat(parts[p]);
 
-        const finalStream = Readable.from(mergedBuffer);
+        // Thử trộn nhạc nền vào giọng đọc; nếu không có file nhạc nền hoặc
+        // ffmpeg lỗi thì dùng bản gốc (không nhạc nền) để không làm gián đoạn lệnh.
+        let outputBuffer = mergedBuffer;
+        try {
+          const mixedBuffer = await mixWithBackgroundMusic(mergedBuffer);
+          if (mixedBuffer) outputBuffer = mixedBuffer;
+        } catch (mixErr) {
+          console.error("Lỗi khi trộn nhạc nền TTS:", mixErr.message || mixErr);
+        }
+
+        const finalStream = Readable.from(outputBuffer);
         // QUAN TRỌNG: phải gán .path giả cho stream, vì FCA đọc thuộc tính này
         // để xác định tên file/mimetype khi upload. Thiếu .path sẽ gây lỗi
         // "Cannot convert undefined or null to object" trong uploadAttachment.
