@@ -79,6 +79,37 @@ function randomDelay(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
 }
 
+// Gửi tin nhắn và trả về Promise<messageID> (hoặc null nếu gửi lỗi/không lấy được id).
+// Dùng để theo dõi các tin nhắn "trạng thái" (đang tải, bắt đầu đọc...) nhằm tự xóa sau khi xong.
+function sendTrackedMessage(api, body, threadID, messageID) {
+  return new Promise((resolve) => {
+    api.sendMessage(body, threadID, (err, info) => {
+      if (err) {
+        console.error("Lỗi gửi tin nhắn trạng thái:", err.message || err);
+        return resolve(null);
+      }
+      resolve(info && info.messageID ? info.messageID : null);
+    }, messageID);
+  });
+}
+
+// Tự xóa (unsend) danh sách tin nhắn trạng thái sau khi đã gửi xong voice.
+async function cleanupStatusMessages(api, ids) {
+  for (const id of ids) {
+    if (!id) continue;
+    try {
+      await new Promise((resolve) => {
+        api.unsendMessage(id, (err) => {
+          if (err) console.error(`Không thể xóa tin nhắn ${id}:`, err.message || err);
+          resolve();
+        });
+      });
+    } catch (e) {
+      console.error(`Lỗi khi xóa tin nhắn ${id}:`, e.message || e);
+    }
+  }
+}
+
 const COOLDOWN_MS = 30000;
 const lastUsed = new Map();
 
@@ -156,8 +187,12 @@ module.exports = {
     const slug = createSlug(storyName);
     const url = `https://truyenfull.live/${slug}/chuong-${chapterNum}/`;
 
+    // Lưu lại ID của các tin nhắn "trạng thái" (loading) để xóa sau khi gửi xong voice
+    const statusMessageIDs = [];
+
     try {
-      api.sendMessage(`⏳ Đang tải và chuyển truyện thành giọng nói...`, threadID, messageID);
+      const loadingId1 = await sendTrackedMessage(api, `⏳ Đang tải và chuyển truyện thành giọng nói...`, threadID, messageID);
+      statusMessageIDs.push(loadingId1);
 
       // 1. Cào nội dung truyện
       const { data } = await axios.get(url, {
@@ -177,6 +212,7 @@ module.exports = {
         document.querySelector(".chapter-content");
 
       if (!contentElement) {
+        await cleanupStatusMessages(api, statusMessageIDs);
         return api.sendMessage(`❌ Không thể trích xuất nội dung. Web có thể đã đổi cấu trúc.`, threadID, messageID);
       }
 
@@ -199,13 +235,19 @@ module.exports = {
       content = content.replace(/\*?\s*Chương này có nội dung ảnh[^.]*\./gi, '').trim();
 
       if (!content) {
+        await cleanupStatusMessages(api, statusMessageIDs);
         return api.sendMessage(`❌ Chương này không có nội dung.`, threadID, messageID);
       }
 
       // 2. Cắt chữ thành các đoạn nhỏ
       const textChunks = splitTextForTTS(content, 200);
 
-      api.sendMessage(`🎙️ Bắt đầu đọc: ${storyName.toUpperCase()} - Chương ${chapterNum}\n📊 Tổng số đoạn âm thanh: ${textChunks.length} (Đang tải và ghép thành 1 file voice, có thể mất một lúc)...`, threadID);
+      const loadingId2 = await sendTrackedMessage(
+        api,
+        `🎙️ Bắt đầu đọc: ${storyName.toUpperCase()} - Chương ${chapterNum}\n📊 Tổng số đoạn âm thanh: ${textChunks.length} (Đang tải và ghép thành 1 file voice, có thể mất một lúc)...`,
+        threadID
+      );
+      statusMessageIDs.push(loadingId2);
 
       // 3. Tải toàn bộ âm thanh trước (để kiểm tra lỗi rồi mới gửi)
       const MAX_RETRY = 3;
@@ -250,6 +292,7 @@ module.exports = {
 
       // Nếu toàn bộ đoạn đều lỗi thì báo và dừng lại
       if (audioBuffers.every(b => b === null)) {
+        await cleanupStatusMessages(api, statusMessageIDs);
         return api.sendMessage(`❌ Không tải được âm thanh cho chương này (có thể do Google TTS đang chặn). Vui lòng thử lại sau.`, threadID, messageID);
       }
 
@@ -262,6 +305,7 @@ module.exports = {
       const validBuffers = audioBuffers.filter(b => b !== null);
 
       if (validBuffers.length === 0) {
+        await cleanupStatusMessages(api, statusMessageIDs);
         return api.sendMessage(`❌ Không có đoạn âm thanh nào tải thành công.`, threadID, messageID);
       }
 
@@ -330,7 +374,11 @@ module.exports = {
         }
       }
 
+      // Đã gửi xong (các) file voice -> tự xóa các tin nhắn trạng thái (loading) ở trên
+      await cleanupStatusMessages(api, statusMessageIDs);
+
     } catch (err) {
+      await cleanupStatusMessages(api, statusMessageIDs);
       if (err.response && err.response.status === 404) {
         return api.sendMessage(`❌ Không tìm thấy truyện hoặc chương này!`, threadID, messageID);
       }
