@@ -15,8 +15,8 @@ const BG_MUSIC_PATH = path.join(__dirname, "..", "assets", "audio", "truyentts-b
 const BG_MUSIC_VOLUME = 0.15; // 0.0 - 1.0, càng nhỏ nhạc nền càng nhỏ so với giọng đọc
 
 // Khoảng thời gian random chờ giữa 2 chương khi tự động đọc tiếp (tính bằng phút)
-const AUTO_NEXT_MIN_MINUTES = 5;
-const AUTO_NEXT_MAX_MINUTES = 8;
+const AUTO_NEXT_MIN_MINUTES = 2;
+const AUTO_NEXT_MAX_MINUTES = 4;
 
 // Trộn 1 buffer giọng đọc (mp3) với nhạc nền (loop cho đủ độ dài), trả về
 // buffer mp3 đã trộn. Nếu không có file nhạc nền hoặc ffmpeg lỗi, trả về null
