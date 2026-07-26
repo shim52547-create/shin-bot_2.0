@@ -15,8 +15,20 @@ const BG_MUSIC_PATH = path.join(__dirname, "..", "assets", "audio", "truyentts-b
 const BG_MUSIC_VOLUME = 0.15; // 0.0 - 1.0, càng nhỏ nhạc nền càng nhỏ so với giọng đọc
 
 // Khoảng thời gian random chờ giữa 2 chương khi tự động đọc tiếp (tính bằng phút)
-const AUTO_NEXT_MIN_MINUTES = 2;
-const AUTO_NEXT_MAX_MINUTES = 4;
+const AUTO_NEXT_MIN_MINUTES = 5;
+const AUTO_NEXT_MAX_MINUTES = 7;
+
+// Lấy prefix lệnh hiện tại của bot (nếu framework có global.config.PREFIX),
+// dùng để hiển thị tin nhắn "lệnh ảo" giống hệt lệnh thật cho người dùng xem.
+// Chỉ để hiển thị - KHÔNG dùng để tự kích hoạt lại command parser (đa số bot
+// tự bỏ qua tin nhắn do chính nó gửi ra để tránh loop vô hạn).
+function getPrefix() {
+  try {
+    return (global.config && global.config.PREFIX) ? global.config.PREFIX : "!";
+  } catch (e) {
+    return "!";
+  }
+}
 
 // Trộn 1 buffer giọng đọc (mp3) với nhạc nền (loop cho đủ độ dài), trả về
 // buffer mp3 đã trộn. Nếu không có file nhạc nền hoặc ffmpeg lỗi, trả về null
@@ -84,7 +96,8 @@ function randomDelay(min, max) {
 }
 
 // Gửi tin nhắn và trả về Promise<messageID> (hoặc null nếu gửi lỗi/không lấy được id).
-// Dùng để theo dõi các tin nhắn "trạng thái" (đang tải, bắt đầu đọc...) nhằm tự xóa sau khi xong.
+// Dùng để theo dõi các tin nhắn "trạng thái" (đang tải, bắt đầu đọc, lệnh ảo...)
+// nhằm tự xóa sau khi xong.
 function sendTrackedMessage(api, body, threadID, messageID) {
   return new Promise((resolve) => {
     api.sendMessage(body, threadID, (err, info) => {
@@ -380,38 +393,74 @@ async function fetchAndSendChapter({ api, threadID, messageID, storyName, slug, 
 
 // Đặt lịch tự động gửi chương kế tiếp sau 1 khoảng thời gian random (phút).
 // Kiểm tra "token" trước khi chạy để chắc chắn phiên chưa bị stop / bị thay bởi phiên mới.
+//
+// Trước khi xử lý, bot sẽ gửi 1 tin nhắn dạng lệnh (vd "!truyentts đấu la 2")
+// để người dùng thấy rõ bot đang "tự gõ lệnh" tiếp tục - CHỈ mang tính hiển thị,
+// không đi qua command parser thật (vì hầu hết framework bot tự bỏ qua tin nhắn
+// do chính nó gửi ra để tránh loop vô hạn). Việc xử lý chương vẫn gọi trực tiếp
+// fetchAndSendChapter() như trước. Tin nhắn lệnh ảo này sẽ được thu hồi sau khi
+// xử lý xong (dù thành công hay lỗi).
 function scheduleNextChapter(api, threadID, token) {
   const delayMs = randomDelay(AUTO_NEXT_MIN_MINUTES * 60 * 1000, AUTO_NEXT_MAX_MINUTES * 60 * 1000);
 
   const timer = setTimeout(async () => {
-    const session = autoSessions.get(threadID);
-    // Phiên đã bị stop hoặc bị thay thế bởi 1 phiên khác -> không làm gì nữa
-    if (!session || session.token !== token) return;
+    let fakeCommandMsgID = null;
+    try {
+      const session = autoSessions.get(threadID);
+      // Phiên đã bị stop hoặc bị thay thế bởi 1 phiên khác -> không làm gì nữa
+      if (!session || session.token !== token) return;
 
-    const chapterNum = session.nextChapter;
-    const status = await fetchAndSendChapter({
-      api,
-      threadID,
-      messageID: null,
-      storyName: session.storyName,
-      slug: session.slug,
-      chapterNum,
-      auto: true
-    });
+      const chapterNum = session.nextChapter;
+      const prefix = getPrefix();
+      const fakeCommandText = `${prefix}truyentts ${session.storyName} ${chapterNum}`;
 
-    // Kiểm tra lại session (có thể vừa bị stop trong lúc đang tải/gửi)
-    const currentSession = autoSessions.get(threadID);
-    if (!currentSession || currentSession.token !== token) return;
+      // 1. Gửi "lệnh ảo" vào nhóm để người dùng thấy bot đang tự tiếp tục
+      fakeCommandMsgID = await sendTrackedMessage(api, fakeCommandText, threadID, null);
 
-    if (status === "ok") {
-      currentSession.nextChapter = chapterNum + 1;
-      scheduleNextChapter(api, threadID, token);
-    } else if (status === "not_found") {
-      api.sendMessage(`📕 Đã đọc hết truyện "${session.storyName.toUpperCase()}" (không tìm thấy chương ${chapterNum}). Dừng tự động đọc.`, threadID);
-      autoSessions.delete(threadID);
-    } else {
-      // "error" hoặc "empty": dừng tự động để tránh lặp lỗi liên tục, người dùng có thể gọi lại thủ công
-      api.sendMessage(`⚠️ Gặp lỗi khi tự động tải chương ${chapterNum} của "${session.storyName.toUpperCase()}". Đã dừng tự động đọc, bạn có thể gõ lại lệnh để tiếp tục thủ công.`, threadID);
+      console.log(`[truyentts] Auto chapter ${chapterNum} of "${session.storyName}" (thread ${threadID})`);
+
+      // 2. Xử lý chương như bình thường (gọi trực tiếp, không đi qua command parser)
+      const status = await fetchAndSendChapter({
+        api,
+        threadID,
+        messageID: null,
+        storyName: session.storyName,
+        slug: session.slug,
+        chapterNum,
+        auto: true
+      });
+
+      console.log(`[truyentts] Chapter ${chapterNum} status: ${status}`);
+
+      // 3. Thu hồi tin nhắn "lệnh ảo" sau khi xử lý xong (dù thành công hay lỗi)
+      if (fakeCommandMsgID) {
+        await cleanupStatusMessages(api, [fakeCommandMsgID]);
+      }
+
+      // Kiểm tra lại session (có thể vừa bị stop trong lúc đang tải/gửi)
+      const currentSession = autoSessions.get(threadID);
+      if (!currentSession || currentSession.token !== token) return;
+
+      if (status === "ok") {
+        currentSession.nextChapter = chapterNum + 1;
+        scheduleNextChapter(api, threadID, token);
+      } else if (status === "not_found") {
+        api.sendMessage(`📕 Đã đọc hết truyện "${session.storyName.toUpperCase()}" (không tìm thấy chương ${chapterNum}). Dừng tự động đọc.`, threadID);
+        autoSessions.delete(threadID);
+      } else {
+        // "error" hoặc "empty": dừng tự động để tránh lặp lỗi liên tục, người dùng có thể gọi lại thủ công
+        api.sendMessage(`⚠️ Gặp lỗi khi tự động tải chương ${chapterNum} của "${session.storyName.toUpperCase()}". Đã dừng tự động đọc, bạn có thể gõ lại lệnh để tiếp tục thủ công.`, threadID);
+        autoSessions.delete(threadID);
+      }
+    } catch (err) {
+      // Bắt mọi lỗi ngoài ý muốn để không "chết lặng" - luôn log ra và báo cho thread biết
+      console.error(`[truyentts] Lỗi không xác định trong scheduleNextChapter (thread ${threadID}):`, err);
+      if (fakeCommandMsgID) {
+        try { await cleanupStatusMessages(api, [fakeCommandMsgID]); } catch (_) {}
+      }
+      try {
+        api.sendMessage(`⚠️ Bot gặp lỗi không xác định khi tự động đọc tiếp. Đã dừng tự động, vui lòng gõ lại lệnh.`, threadID);
+      } catch (_) {}
       autoSessions.delete(threadID);
     }
   }, delayMs);
@@ -426,7 +475,7 @@ module.exports = {
   config: {
     name: "truyentts",
     aliases: ["doctruyen tts"],
-    version: "2.2",
+    version: "2.3",
     role: 0,
     description: "Đọc truyện chữ bằng giọng nói (Hỗ trợ truyện dài, tự động đọc tiếp)",
     usage: "truyentts <tên truyện> <số chương> | truyentts stop",
