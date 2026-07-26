@@ -12,7 +12,7 @@ ffmpeg.setFfmpegPath(ffmpegPath);
 // Danh sách giọng tiếng Việt phổ biến: "vi-VN-HoaiMyNeural" (nữ), "vi-VN-NamMinhNeural" (nam)
 const TTS_VOICE = "vi-VN-HoaiMyNeural";
 const TTS_LANG = "vi-VN";
-const TTS_RATE = "default";   // vd: "+15%" để đọc nhanh hơn, "-10%" để đọc chậm hơn
+const TTS_RATE = "+15%";   // vd: "+15%" để đọc nhanh hơn, "-10%" để đọc chậm hơn
 const TTS_PITCH = "default";  // vd: "+5Hz"
 const TTS_VOLUME = "default";
 
@@ -23,8 +23,8 @@ const BG_MUSIC_PATH = path.join(__dirname, "..", "assets", "audio", "truyentts-b
 const BG_MUSIC_VOLUME = 0.15; // 0.0 - 1.0, càng nhỏ nhạc nền càng nhỏ so với giọng đọc
 
 // Khoảng thời gian random chờ giữa 2 chương khi tự động đọc tiếp (tính bằng phút)
-const AUTO_NEXT_MIN_MINUTES = 5;
-const AUTO_NEXT_MAX_MINUTES = 7;
+const AUTO_NEXT_MIN_MINUTES = 2;
+const AUTO_NEXT_MAX_MINUTES = 5;
 
 // Lấy prefix lệnh hiện tại của bot (nếu framework có global.config.PREFIX),
 // dùng để hiển thị tin nhắn "lệnh ảo" giống hệt lệnh thật cho người dùng xem.
