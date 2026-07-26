@@ -1,12 +1,20 @@
 const axios = require("axios");
 const { JSDOM } = require("jsdom");
-const { Readable } = require("stream"); // Fix lỗi Uint8Array
+const { EdgeTTS } = require("node-edge-tts");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const ffmpegPath = require("@ffmpeg-installer/ffmpeg").path;
 const ffmpeg = require("fluent-ffmpeg");
 ffmpeg.setFfmpegPath(ffmpegPath);
+
+// ==== CẤU HÌNH GIỌNG ĐỌC EDGE-TTS ====
+// Danh sách giọng tiếng Việt phổ biến: "vi-VN-HoaiMyNeural" (nữ), "vi-VN-NamMinhNeural" (nam)
+const TTS_VOICE = "vi-VN-HoaiMyNeural";
+const TTS_LANG = "vi-VN";
+const TTS_RATE = "default";   // vd: "+15%" để đọc nhanh hơn, "-10%" để đọc chậm hơn
+const TTS_PITCH = "default";  // vd: "+5Hz"
+const TTS_VOLUME = "default";
 
 // File nhạc nền cố định dùng chung cho mọi truyện. Tự upload file mp3 và đặt
 // đúng đường dẫn này (tạo thư mục assets/audio nếu chưa có). Nếu file không
@@ -58,7 +66,6 @@ function mixWithBackgroundMusic(narrationBuffer) {
         .audioCodec("libmp3lame")
         .format("mp3")
         .on("error", () => {
-          // Dọn file tạm rồi báo lỗi (fallback) cho nơi gọi
           fs.unlink(narrationPath, () => {});
           fs.unlink(outputPath, () => {});
           resolve(null);
@@ -96,8 +103,6 @@ function randomDelay(min, max) {
 }
 
 // Gửi tin nhắn và trả về Promise<messageID> (hoặc null nếu gửi lỗi/không lấy được id).
-// Dùng để theo dõi các tin nhắn "trạng thái" (đang tải, bắt đầu đọc, lệnh ảo...)
-// nhằm tự xóa sau khi xong.
 function sendTrackedMessage(api, body, threadID, messageID) {
   return new Promise((resolve) => {
     api.sendMessage(body, threadID, (err, info) => {
@@ -131,10 +136,8 @@ const COOLDOWN_MS = 30000;
 const lastUsed = new Map();
 
 // Các phiên "tự động đọc tiếp" đang chạy, khóa theo threadID.
-// session = { token, storyName, slug, nextChapter, timer, senderID }
 const autoSessions = new Map();
 
-// Dừng phiên tự động đang chạy trong 1 thread (nếu có). Trả về true nếu vừa dừng 1 phiên.
 function stopAutoSession(threadID) {
   const session = autoSessions.get(threadID);
   if (!session) return false;
@@ -143,17 +146,17 @@ function stopAutoSession(threadID) {
   return true;
 }
 
-// Hàm cắt text thông minh hơn, tối đa 200 ký tự/đoạn để Google TTS đọc tốt nhất
-function splitTextForTTS(text, maxLen = 200) {
+// Cắt text thành các đoạn tối đa maxLen ký tự, ưu tiên cắt tại dấu câu.
+// Edge-TTS chấp nhận đoạn dài hơn hẳn Google Translate TTS (không giới hạn ~200
+// ký tự), nên để mặc định 1500 ký tự/đoạn -> giảm mạnh số request mỗi chương.
+function splitTextForTTS(text, maxLen = 1500) {
   const chunks = [];
   let current = '';
-  // Tách theo dấu câu để bot đọc có nghỉ hơi
   const parts = text.replace(/([.!?,;…])\s*/g, '$1|').split('|');
 
   for (const part of parts) {
     if (part.trim().length === 0) continue;
 
-    // Nếu 1 câu dài bất thường (không có dấu chấm), ép cắt bằng khoảng trắng
     if (part.length > maxLen) {
       if (current.trim()) chunks.push(current.trim());
       const words = part.split(' ');
@@ -179,10 +182,30 @@ function splitTextForTTS(text, maxLen = 200) {
   return chunks;
 }
 
+// Chuyển 1 đoạn text thành buffer mp3 bằng Edge-TTS. node-edge-tts chỉ hỗ trợ
+// ghi thẳng ra file (không trả buffer trực tiếp), nên ghi ra file tạm rồi đọc
+// lại buffer, sau đó xóa file tạm.
+async function edgeTtsToBuffer(text) {
+  const tmpDir = os.tmpdir();
+  const tmpFile = path.join(tmpDir, `edge-tts-${Date.now()}-${Math.random().toString(36).slice(2)}.mp3`);
+  const tts = new EdgeTTS({
+    voice: TTS_VOICE,
+    lang: TTS_LANG,
+    rate: TTS_RATE,
+    pitch: TTS_PITCH,
+    volume: TTS_VOLUME
+  });
+  try {
+    await tts.ttsPromise(text, tmpFile);
+    const buffer = await fs.promises.readFile(tmpFile);
+    return buffer;
+  } finally {
+    fs.unlink(tmpFile, () => {});
+  }
+}
+
 // Cào + chuyển 1 chương thành giọng nói rồi gửi vào thread.
 // Trả về một trong các trạng thái: "ok", "not_found", "empty", "error".
-// messageID chỉ dùng để reply khi đây là lệnh do người dùng gõ trực tiếp (auto = false);
-// khi tự động gửi (auto = true) không reply vào tin nhắn nào cả.
 async function fetchAndSendChapter({ api, threadID, messageID, storyName, slug, chapterNum, auto }) {
   const url = `https://truyenfull.live/${slug}/chuong-${chapterNum}/`;
   const statusMessageIDs = [];
@@ -215,22 +238,16 @@ async function fetchAndSendChapter({ api, threadID, messageID, storyName, slug, 
       return "error";
     }
 
-    // Xóa thẻ <em> cảnh báo "chương có nội dung ảnh..." nếu có, không đọc vào TTS
     contentElement.querySelectorAll('em').forEach(em => {
       if (em.textContent.includes('nội dung ảnh')) {
         em.remove();
       }
     });
 
-    // Xóa các div quảng cáo lồng bên trong nội dung chương (ví dụ #ads-chapter-top/bottom)
     contentElement.querySelectorAll('div[id^="ads-"]').forEach(div => div.remove());
 
-    // Lấy toàn bộ nội dung thô, không lọc bớt phần nào — chỉ dọn khoảng trắng thừa.
     let content = contentElement.textContent.trim();
     content = content.replace(/\n\s*\n/g, ". ").replace(/\s{2,}/g, ' ').trim();
-
-    // Lớp phòng hờ: nếu web đổi cấu trúc và câu cảnh báo không còn nằm trong <em>,
-    // vẫn cố loại bỏ theo nội dung câu.
     content = content.replace(/\*?\s*Chương này có nội dung ảnh[^.]*\./gi, '').trim();
 
     if (!content) {
@@ -239,8 +256,8 @@ async function fetchAndSendChapter({ api, threadID, messageID, storyName, slug, 
       return "empty";
     }
 
-    // 2. Cắt chữ thành các đoạn nhỏ
-    const textChunks = splitTextForTTS(content, 200);
+    // 2. Cắt chữ thành các đoạn (Edge-TTS chịu được đoạn dài hơn Google TTS nhiều)
+    const textChunks = splitTextForTTS(content, 1500);
 
     const loadingId2 = await sendTrackedMessage(
       api,
@@ -255,26 +272,15 @@ async function fetchAndSendChapter({ api, threadID, messageID, storyName, slug, 
     const failedIndexes = [];
 
     for (let i = 0; i < textChunks.length; i++) {
-      const encodedText = encodeURIComponent(textChunks[i]);
-      const ttsUrl = `https://translate.google.com/translate_tts?ie=UTF-8&tl=vi&client=tw-ob&q=${encodedText}`;
-
       let buffer = null;
       for (let attempt = 1; attempt <= MAX_RETRY; attempt++) {
         try {
-          const audioRes = await axios.get(ttsUrl, {
-            responseType: "arraybuffer",
-            timeout: 10000,
-            headers: {
-              "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-              "Referer": "https://translate.google.com/"
-            }
-          });
-          buffer = Buffer.from(audioRes.data);
+          buffer = await edgeTtsToBuffer(textChunks[i]);
           break; // thành công, thoát vòng retry
         } catch (err) {
           console.error(`Đoạn ${i + 1} lỗi (lần ${attempt}/${MAX_RETRY}): ${err.message}`);
           if (attempt < MAX_RETRY) {
-            await sleep(randomDelay(1000, 2000)); // chờ lâu hơn trước khi thử lại
+            await sleep(randomDelay(1000, 2000));
           }
         }
       }
@@ -286,18 +292,16 @@ async function fetchAndSendChapter({ api, threadID, messageID, storyName, slug, 
         failedIndexes.push(i + 1);
       }
 
-      // Nghỉ ngắn giữa các lần gọi TTS để tránh bị Google chặn/rate-limit
-      await sleep(randomDelay(300, 700));
+      // Edge-TTS ít bị chặn hơn Google Translate TTS, nhưng vẫn nghỉ ngắn cho an toàn
+      await sleep(randomDelay(200, 500));
     }
 
-    // Nếu toàn bộ đoạn đều lỗi thì báo và dừng lại
     if (audioBuffers.every(b => b === null)) {
       await cleanupStatusMessages(api, statusMessageIDs);
-      await api.sendMessage(`❌ Không tải được âm thanh cho chương này (có thể do Google TTS đang chặn). Vui lòng thử lại sau.`, threadID, replyID);
+      await api.sendMessage(`❌ Không tải được âm thanh cho chương này (Edge-TTS có thể đang gặp sự cố). Vui lòng thử lại sau.`, threadID, replyID);
       return "error";
     }
 
-    // Báo cho người dùng biết nếu có đoạn bị bỏ qua sau khi đã retry
     if (failedIndexes.length > 0) {
       api.sendMessage(`⚠️ ${failedIndexes.length}/${textChunks.length} đoạn tải âm thanh thất bại sau ${MAX_RETRY} lần thử, sẽ bị bỏ qua (đoạn số: ${failedIndexes.slice(0, 20).join(', ')}${failedIndexes.length > 20 ? '...' : ''}).`, threadID);
     }
@@ -311,8 +315,6 @@ async function fetchAndSendChapter({ api, threadID, messageID, storyName, slug, 
       return "error";
     }
 
-    // Facebook Messenger giới hạn dung lượng file đính kèm khoảng 25MB.
-    // Để an toàn, mỗi phần chỉ gộp tối đa ~24MB rồi cắt sang phần mới.
     const MAX_PART_BYTES = 24 * 1024 * 1024;
 
     const parts = [];
@@ -320,7 +322,6 @@ async function fetchAndSendChapter({ api, threadID, messageID, storyName, slug, 
     let currentSize = 0;
 
     for (const buffer of validBuffers) {
-      // Nếu thêm buffer này vào sẽ vượt ngưỡng, chốt phần hiện tại lại trước
       if (currentSize + buffer.length > MAX_PART_BYTES && currentPart.length > 0) {
         parts.push(currentPart);
         currentPart = [];
@@ -331,13 +332,9 @@ async function fetchAndSendChapter({ api, threadID, messageID, storyName, slug, 
     }
     if (currentPart.length > 0) parts.push(currentPart);
 
-    // Nối các buffer mp3 lại với nhau. Với mp3 do Google TTS trả về (không có
-    // header/ID3 phức tạp), nối buffer trực tiếp vẫn phát được liền mạch.
     for (let p = 0; p < parts.length; p++) {
       const mergedBuffer = Buffer.concat(parts[p]);
 
-      // Thử trộn nhạc nền vào giọng đọc; nếu không có file nhạc nền hoặc
-      // ffmpeg lỗi thì dùng bản gốc (không nhạc nền) để không làm gián đoạn lệnh.
       let outputBuffer = mergedBuffer;
       try {
         const mixedBuffer = await mixWithBackgroundMusic(mergedBuffer);
@@ -346,10 +343,7 @@ async function fetchAndSendChapter({ api, threadID, messageID, storyName, slug, 
         console.error("Lỗi khi trộn nhạc nền TTS:", mixErr.message || mixErr);
       }
 
-      const finalStream = Readable.from(outputBuffer);
-      // QUAN TRỌNG: phải gán .path giả cho stream, vì FCA đọc thuộc tính này
-      // để xác định tên file/mimetype khi upload. Thiếu .path sẽ gây lỗi
-      // "Cannot convert undefined or null to object" trong uploadAttachment.
+      const finalStream = require("stream").Readable.from(outputBuffer);
       const partLabel = parts.length > 1 ? `-phan-${p + 1}` : '';
       finalStream.path = `${slug}-chuong-${chapterNum}${partLabel}.mp3`;
 
@@ -370,13 +364,11 @@ async function fetchAndSendChapter({ api, threadID, messageID, storyName, slug, 
         });
       });
 
-      // Nghỉ ngắn giữa các phần để tránh gửi dồn dập
       if (p < parts.length - 1) {
         await sleep(randomDelay(2000, 3500));
       }
     }
 
-    // Đã gửi xong (các) file voice -> tự xóa các tin nhắn trạng thái (loading) ở trên
     await cleanupStatusMessages(api, statusMessageIDs);
     return "ok";
 
@@ -392,14 +384,9 @@ async function fetchAndSendChapter({ api, threadID, messageID, storyName, slug, 
 }
 
 // Đặt lịch tự động gửi chương kế tiếp sau 1 khoảng thời gian random (phút).
-// Kiểm tra "token" trước khi chạy để chắc chắn phiên chưa bị stop / bị thay bởi phiên mới.
-//
-// Trước khi xử lý, bot sẽ gửi 1 tin nhắn dạng lệnh (vd "!truyentts đấu la 2")
-// để người dùng thấy rõ bot đang "tự gõ lệnh" tiếp tục - CHỈ mang tính hiển thị,
-// không đi qua command parser thật (vì hầu hết framework bot tự bỏ qua tin nhắn
-// do chính nó gửi ra để tránh loop vô hạn). Việc xử lý chương vẫn gọi trực tiếp
-// fetchAndSendChapter() như trước. Tin nhắn lệnh ảo này sẽ được thu hồi sau khi
-// xử lý xong (dù thành công hay lỗi).
+// Trước khi xử lý, bot gửi 1 tin nhắn dạng lệnh (vd "!truyentts đấu la 2") để
+// người dùng thấy rõ bot đang "tự tiếp tục" - CHỈ mang tính hiển thị, không đi
+// qua command parser thật. Tin nhắn lệnh ảo này được thu hồi sau khi xử lý xong.
 function scheduleNextChapter(api, threadID, token) {
   const delayMs = randomDelay(AUTO_NEXT_MIN_MINUTES * 60 * 1000, AUTO_NEXT_MAX_MINUTES * 60 * 1000);
 
@@ -407,19 +394,16 @@ function scheduleNextChapter(api, threadID, token) {
     let fakeCommandMsgID = null;
     try {
       const session = autoSessions.get(threadID);
-      // Phiên đã bị stop hoặc bị thay thế bởi 1 phiên khác -> không làm gì nữa
       if (!session || session.token !== token) return;
 
       const chapterNum = session.nextChapter;
       const prefix = getPrefix();
       const fakeCommandText = `${prefix}truyentts ${session.storyName} ${chapterNum}`;
 
-      // 1. Gửi "lệnh ảo" vào nhóm để người dùng thấy bot đang tự tiếp tục
       fakeCommandMsgID = await sendTrackedMessage(api, fakeCommandText, threadID, null);
 
       console.log(`[truyentts] Auto chapter ${chapterNum} of "${session.storyName}" (thread ${threadID})`);
 
-      // 2. Xử lý chương như bình thường (gọi trực tiếp, không đi qua command parser)
       const status = await fetchAndSendChapter({
         api,
         threadID,
@@ -432,12 +416,10 @@ function scheduleNextChapter(api, threadID, token) {
 
       console.log(`[truyentts] Chapter ${chapterNum} status: ${status}`);
 
-      // 3. Thu hồi tin nhắn "lệnh ảo" sau khi xử lý xong (dù thành công hay lỗi)
       if (fakeCommandMsgID) {
         await cleanupStatusMessages(api, [fakeCommandMsgID]);
       }
 
-      // Kiểm tra lại session (có thể vừa bị stop trong lúc đang tải/gửi)
       const currentSession = autoSessions.get(threadID);
       if (!currentSession || currentSession.token !== token) return;
 
@@ -448,12 +430,10 @@ function scheduleNextChapter(api, threadID, token) {
         api.sendMessage(`📕 Đã đọc hết truyện "${session.storyName.toUpperCase()}" (không tìm thấy chương ${chapterNum}). Dừng tự động đọc.`, threadID);
         autoSessions.delete(threadID);
       } else {
-        // "error" hoặc "empty": dừng tự động để tránh lặp lỗi liên tục, người dùng có thể gọi lại thủ công
         api.sendMessage(`⚠️ Gặp lỗi khi tự động tải chương ${chapterNum} của "${session.storyName.toUpperCase()}". Đã dừng tự động đọc, bạn có thể gõ lại lệnh để tiếp tục thủ công.`, threadID);
         autoSessions.delete(threadID);
       }
     } catch (err) {
-      // Bắt mọi lỗi ngoài ý muốn để không "chết lặng" - luôn log ra và báo cho thread biết
       console.error(`[truyentts] Lỗi không xác định trong scheduleNextChapter (thread ${threadID}):`, err);
       if (fakeCommandMsgID) {
         try { await cleanupStatusMessages(api, [fakeCommandMsgID]); } catch (_) {}
@@ -475,9 +455,9 @@ module.exports = {
   config: {
     name: "truyentts",
     aliases: ["doctruyen tts"],
-    version: "2.3",
+    version: "3.0",
     role: 0,
-    description: "Đọc truyện chữ bằng giọng nói (Hỗ trợ truyện dài, tự động đọc tiếp)",
+    description: "Đọc truyện chữ bằng giọng nói Edge-TTS (Hỗ trợ truyện dài, tự động đọc tiếp)",
     usage: "truyentts <tên truyện> <số chương> | truyentts stop",
     category: "Giải trí"
   },
@@ -485,7 +465,6 @@ module.exports = {
   run: async ({ api, event, args }) => {
     const { threadID, messageID, senderID } = event;
 
-    // Lệnh dừng tự động đọc: !truyentts stop
     if (args.length === 1 && args[0].toLowerCase() === "stop") {
       const stopped = stopAutoSession(threadID);
       return api.sendMessage(
@@ -518,7 +497,6 @@ module.exports = {
     const chapterNum = parseInt(match[2], 10);
     const slug = createSlug(storyName);
 
-    // Nếu thread này đang có 1 phiên tự động khác chạy, dừng nó lại trước khi bắt đầu phiên mới
     stopAutoSession(threadID);
 
     const status = await fetchAndSendChapter({
@@ -531,7 +509,6 @@ module.exports = {
       auto: false
     });
 
-    // Chỉ bắt đầu tự động đọc tiếp nếu chương vừa rồi gửi thành công
     if (status === "ok") {
       const token = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
       autoSessions.set(threadID, {
