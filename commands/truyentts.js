@@ -8,16 +8,24 @@ const ffmpegPath = require("@ffmpeg-installer/ffmpeg").path;
 const ffmpeg = require("fluent-ffmpeg");
 ffmpeg.setFfmpegPath(ffmpegPath);
 
-// ==== CẤU HÌNH GIỌNG ĐỌC VIENEU-TTS (chạy qua Colab/Gradio) ====
-// QUAN TRỌNG: URL này đổi MỖI LẦN Colab bị restart. Mỗi lần chạy lại Colab,
-// copy URL public mới (dạng https://xxxxx.gradio.live) dán đè vào đây rồi
-// khởi động lại bot. Đây chỉ là giải pháp TẠM để test, chưa chạy 24/7 được.
-const VIENEU_SPACE_URL = "https://1f18be71f77e283272.gradio.live";
+// ==== CẤU HÌNH GIỌNG ĐỌC VIENEU-TTS (Hugging Face Space - của tác giả gốc) ====
+// Dùng thẳng Space public của tác giả pnnbao97, KHÔNG cần deploy Space riêng.
+// Space ID lấy từ URL: huggingface.co/spaces/<VIENEU_HF_SPACE>
+// LƯU Ý: đây là Space CHUNG cho mọi người dùng, không do mình quản lý:
+//  - có thể bị chờ hàng đợi (queue) khi nhiều người cùng gọi
+//  - tác giả có thể sửa/tắt Space bất cứ lúc nào không báo trước
+//  - tỷ lệ lỗi của endpoint /synthesize theo tài liệu API là ~30% (bình
+//    thường, không phải do bot lỗi) -> code đã có retry (MAX_RETRY) để bù.
+const VIENEU_HF_SPACE = "pnnbao-ump/VieNeu-TTS-v3-Turbo";
 const VIENEU_VOICE = "Trúc Ly";
-const VIENEU_STYLE = "Kể chuyện"; // phong cách đọc, hợp để đọc truyện
-// VieNeu tự chia nhỏ text theo tham số này ở PHÍA SERVER, nên có thể gửi cả
-// đoạn dài trong 1 lần gọi thay vì tự cắt nhỏ như trước.
-const TTS_MAX_CHUNK_LEN = 3000;
+// max_chars: giới hạn CỨNG của Space này (thanh trượt UI tối đa 400), nghĩa
+// là mình VẪN phải tự cắt nhỏ text ở phía bot rồi gọi API nhiều lần, không
+// thể gửi 1 đoạn dài rồi tin server tự chia hết cho mình.
+const TTS_MAX_CHUNK_LEN = 400;
+// max_new_frames: độ dài audio tối đa sinh ra cho MỖI lần gọi (mỗi đoạn tối
+// đa 400 ký tự). Để gần mức tối đa (1200) để giảm khả năng bị cắt audio
+// giữa câu khi đoạn text dài.
+const VIENEU_MAX_NEW_FRAMES = 1200;
 
 // File nhạc nền cố định dùng chung cho mọi truyện. Tự upload file mp3 và đặt
 // đúng đường dẫn này (tạo thư mục assets/audio nếu chưa có). Nếu file không
@@ -214,27 +222,32 @@ function splitTextForTTS(text, maxLen = 3000) {
   return chunks;
 }
 
-// Chuyển 1 đoạn text thành buffer mp3/wav bằng VieNeu-TTS (chạy qua Colab,
-// lộ ra ngoài dạng Gradio app). Gọi qua @gradio/client tới endpoint /wrapper.
+// Chuyển 1 đoạn text thành buffer mp3/wav bằng VieNeu-TTS, gọi qua
+// @gradio/client tới Space Hugging Face của tác giả, endpoint /synthesize.
+// LƯU Ý: text truyền vào đây phải đã được cắt <= TTS_MAX_CHUNK_LEN (400 ký
+// tự) ở nơi gọi hàm này (splitTextForTTS), vì max_chars của Space chỉ nhận
+// tối đa 400 - gửi đoạn dài hơn có thể bị cắt audio dở dang.
 async function vieneuTtsToBuffer(text) {
-  const client = await GradioClient.connect(VIENEU_SPACE_URL);
+  const client = await GradioClient.connect(VIENEU_HF_SPACE);
 
-  const result = await client.predict("/wrapper", {
-    param_0: text,               // nội dung cần đọc
-    param_1: VIENEU_VOICE,       // giọng preset (vd "Trúc Ly")
-    param_2: null,               // audio mẫu - không cần vì dùng giọng có sẵn
-    param_3: null,               // transcript audio mẫu - không cần
-    param_5: "Standard (Một lần)",
-    param_6: true,               // batch processing
-    param_7: 32,                 // batch size
-    param_8: 0.8,                // temperature
-    param_9: 256,                // max chars/chunk (server tự chia nội bộ)
-    param_10: VIENEU_STYLE,      // phong cách đọc
-    param_11: true               // denoise
+  const result = await client.predict("/synthesize", {
+    text: text,
+    voice: VIENEU_VOICE,          // giọng preset, vd "Trúc Ly"
+    ref_audio: null,               // không dùng nhân bản giọng, chỉ giọng preset
+    temperature: 0.8,
+    top_k: 25,
+    top_p: 0.95,
+    repetition_penalty: 1.2,
+    max_new_frames: VIENEU_MAX_NEW_FRAMES,
+    max_chars: TTS_MAX_CHUNK_LEN,
   });
 
   const audioInfo = result.data[0];
-  const audioUrl = audioInfo.url || `${VIENEU_SPACE_URL}/gradio_api/file=${audioInfo.path}`;
+  // Với Space host trên Hugging Face, @gradio/client thường trả sẵn URL đầy
+  // đủ trong audioInfo.url. Chỉ fallback tự dựng URL khi thiếu (dùng root
+  // lấy từ config của client, không hardcode domain).
+  const baseUrl = (client.config && client.config.root) ? client.config.root : "";
+  const audioUrl = audioInfo.url || `${baseUrl}/gradio_api/file=${audioInfo.path}`;
 
   const audioResponse = await axios.get(audioUrl, { responseType: "arraybuffer", timeout: 60000 });
   return Buffer.from(audioResponse.data);
@@ -315,7 +328,7 @@ async function fetchAndSendChapter({ api, threadID, messageID, storyName, slug, 
           break; // thành công, thoát vòng retry
         } catch (err) {
           // Log đầy đủ lỗi thật (không chỉ err.message) để biết chính xác
-          // nguyên nhân: timeout, connection reset, Colab bị ngắt, v.v.
+          // nguyên nhân: timeout, connection reset, Space đang bận/ngủ, v.v.
           console.error(`Đoạn ${i + 1} lỗi (lần ${attempt}/${MAX_RETRY}): ${describeError(err)}`);
           if (attempt < MAX_RETRY) {
             await sleep(randomDelay(2000, 4000));
@@ -336,7 +349,7 @@ async function fetchAndSendChapter({ api, threadID, messageID, storyName, slug, 
 
     if (audioBuffers.every(b => b === null)) {
       await cleanupStatusMessages(api, statusMessageIDs);
-      await api.sendMessage(`❌ Không tải được âm thanh cho chương này (VieNeu-TTS/Colab có thể đang gặp sự cố hoặc đã bị ngắt). Vui lòng thử lại sau.`, threadID, replyID);
+      await api.sendMessage(`❌ Không tải được âm thanh cho chương này (Space VieNeu-TTS có thể đang bận/quá tải vì dùng chung với nhiều người khác). Vui lòng thử lại sau.`, threadID, replyID);
       return "error";
     }
 
