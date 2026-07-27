@@ -14,18 +14,19 @@ ffmpeg.setFfmpegPath(ffmpegPath);
 // LƯU Ý: đây là Space CHUNG cho mọi người dùng, không do mình quản lý:
 //  - có thể bị chờ hàng đợi (queue) khi nhiều người cùng gọi
 //  - tác giả có thể sửa/tắt Space bất cứ lúc nào không báo trước
-//  - tỷ lệ lỗi của endpoint /synthesize theo tài liệu API là ~30% (bình
-//    thường, không phải do bot lỗi) -> code đã có retry (MAX_RETRY) để bù.
-const VIENEU_HF_SPACE = "pnnbao-ump/VieNeu-TTS-v3-Turbo";
-const VIENEU_VOICE = "Trúc Ly";
-// max_chars: giới hạn CỨNG của Space này (thanh trượt UI tối đa 400), nghĩa
-// là mình VẪN phải tự cắt nhỏ text ở phía bot rồi gọi API nhiều lần, không
-// thể gửi 1 đoạn dài rồi tin server tự chia hết cho mình.
+//  - đã chuyển từ Space "VieNeu-TTS-v3-Turbo" (endpoint /synthesize) sang
+//    Space gốc "VieNeu-TTS" (endpoint /synthesize_speech) vì Space v3-Turbo
+//    bị lỗi "Could not resolve app config" (Space không phản hồi config khi
+//    kết nối - có thể do đang sleep/lỗi runtime/quá tải).
+const VIENEU_HF_SPACE = "pnnbao-ump/VieNeu-TTS";
+// Giọng có sẵn của Space này: 'Tuyên (nam miền Bắc)', 'Vĩnh (nam miền Nam)',
+// 'Bình (nam miền Bắc)', 'Đoan (nữ miền Nam)', 'Ngọc (nữ miền Bắc)',
+// 'Ly (nữ miền Bắc)'. Không còn giọng "Trúc Ly" như Space cũ -> chọn giọng
+// nữ miền Bắc gần nhất.
+const VIENEU_VOICE = "Ly (nữ miền Bắc)";
+// Space này không công bố giới hạn ký tự cứng cho mỗi lần gọi, nhưng vẫn cắt
+// nhỏ text ở phía bot để tránh 1 request quá dài (dễ timeout/audio bị lỗi).
 const TTS_MAX_CHUNK_LEN = 400;
-// max_new_frames: độ dài audio tối đa sinh ra cho MỖI lần gọi (mỗi đoạn tối
-// đa 400 ký tự). Để gần mức tối đa (1200) để giảm khả năng bị cắt audio
-// giữa câu khi đoạn text dài.
-const VIENEU_MAX_NEW_FRAMES = 1200;
 
 // File nhạc nền cố định dùng chung cho mọi truyện. Tự upload file mp3 và đặt
 // đúng đường dẫn này (tạo thư mục assets/audio nếu chưa có). Nếu file không
@@ -223,23 +224,15 @@ function splitTextForTTS(text, maxLen = 3000) {
 }
 
 // Chuyển 1 đoạn text thành buffer mp3/wav bằng VieNeu-TTS, gọi qua
-// @gradio/client tới Space Hugging Face của tác giả, endpoint /synthesize.
-// LƯU Ý: text truyền vào đây phải đã được cắt <= TTS_MAX_CHUNK_LEN (400 ký
-// tự) ở nơi gọi hàm này (splitTextForTTS), vì max_chars của Space chỉ nhận
-// tối đa 400 - gửi đoạn dài hơn có thể bị cắt audio dở dang.
+// @gradio/client tới Space Hugging Face của tác giả, endpoint /synthesize_speech.
 async function vieneuTtsToBuffer(text) {
   const client = await GradioClient.connect(VIENEU_HF_SPACE);
 
-  const result = await client.predict("/synthesize", {
+  const result = await client.predict("/synthesize_speech", {
     text: text,
-    voice: VIENEU_VOICE,          // giọng preset, vd "Trúc Ly"
-    ref_audio: null,               // không dùng nhân bản giọng, chỉ giọng preset
-    temperature: 0.8,
-    top_k: 25,
-    top_p: 0.95,
-    repetition_penalty: 1.2,
-    max_new_frames: VIENEU_MAX_NEW_FRAMES,
-    max_chars: TTS_MAX_CHUNK_LEN,
+    voice_choice: VIENEU_VOICE, // giọng preset, vd "Ly (nữ miền Bắc)"
+    custom_audio: null,          // không dùng nhân bản giọng, chỉ giọng preset
+    custom_text: null,
   });
 
   const audioInfo = result.data[0];
@@ -305,7 +298,7 @@ async function fetchAndSendChapter({ api, threadID, messageID, storyName, slug, 
       return "empty";
     }
 
-    // 2. Cắt chữ thành các đoạn ngắn (Google Translate TTS giới hạn độ dài text/request)
+    // 2. Cắt chữ thành các đoạn ngắn
     const textChunks = splitTextForTTS(content, TTS_MAX_CHUNK_LEN);
 
     const loadingId2 = await sendTrackedMessage(
@@ -343,7 +336,7 @@ async function fetchAndSendChapter({ api, threadID, messageID, storyName, slug, 
         failedIndexes.push(i + 1);
       }
 
-      // Mỗi lần gọi VieNeu-TTS đã mất khá lâu (~10s+), không cần nghỉ thêm nhiều.
+      // Nghỉ ngắn giữa các lần gọi để tránh dồn dập request lên Space chung.
       await sleep(randomDelay(500, 1000));
     }
 
@@ -509,7 +502,7 @@ module.exports = {
     aliases: ["doctruyen tts"],
     version: "3.0",
     role: 0,
-    description: "Đọc truyện chữ bằng giọng nói VieNeu-TTS - Trúc Ly (Hỗ trợ truyện dài, tự động đọc tiếp)",
+    description: "Đọc truyện chữ bằng giọng nói VieNeu-TTS (Hỗ trợ truyện dài, tự động đọc tiếp)",
     usage: "truyentts <tên truyện> <số chương> | truyentts stop",
     category: "Giải trí"
   },
