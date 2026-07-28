@@ -1,6 +1,5 @@
 const axios = require("axios");
 const { JSDOM } = require("jsdom");
-const { Client: GradioClient } = require("@gradio/client");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -8,25 +7,16 @@ const ffmpegPath = require("@ffmpeg-installer/ffmpeg").path;
 const ffmpeg = require("fluent-ffmpeg");
 ffmpeg.setFfmpegPath(ffmpegPath);
 
-// ==== CẤU HÌNH GIỌNG ĐỌC VIENEU-TTS (chạy qua Hugging Face Space) ====
-// Sau khi chạy `gradio deploy` trong Colab (hoặc máy bạn) như đã hướng dẫn,
-// bạn sẽ có 1 Space cố định dạng "username/ten-space". Điền đúng chuỗi đó
-// vào đây - KHÔNG cần link dạng https://..., @gradio/client tự nhận diện và
-// kết nối tới Space đang chạy. URL này KHÔNG đổi qua thời gian như Colab.
-const VIENEU_HF_SPACE = "https://d2ab397da137f7ac4f.gradio.live"; // <-- URL Colab hiện tại (đổi mỗi lần restart)
-const VIENEU_VOICE = "Trúc Ly";
-const VIENEU_STYLE = "Kể chuyện"; // phong cách đọc, hợp để đọc truyện
-// VieNeu-TTS ở chế độ "Standard (Một lần)" sẽ CẮT NGẮN audio nếu nhét cả đoạn
-// text dài vào 1 lần gọi (giới hạn độ dài sinh audio mỗi lần gọi model). Vì
-// vậy phải tự cắt nhỏ và gọi nhiều lần - MỖI LẦN GỌI vẫn ngắn (400 ký tự) để
-// không bị cắt, nhưng sẽ GHÉP một nhóm lại rồi mới gửi (xem TTS_GROUP_SIZE).
-const TTS_MAX_CHUNK_LEN = 400;
+// ==== CẤU HÌNH GIỌNG ĐỌC GOOGLE TRANSLATE TTS ====
+// tl: mã ngôn ngữ Google Translate dùng để đọc ("vi" = tiếng Việt)
+const TTS_LANG = "vi";
+// ttsspeed: "1" tốc độ bình thường, có thể thử giá trị nhỏ hơn 1 để đọc chậm hơn
+const TTS_SPEED = "1";
+// Google Translate TTS chỉ chấp nhận đoạn text ngắn (an toàn nhất là ~180-200 ký tự/request)
+const TTS_MAX_CHUNK_LEN = 180;
 // Số đoạn nhỏ được tải xong rồi mới ghép lại thành 1 file gửi đi. Đặt lớn
-// (999) để mặc định GỘP CẢ CHƯƠNG thành 1 file duy nhất (giống hành vi cũ,
-// ra 1 file 7-11 phút/chương) - vì mỗi chương thường chỉ có vài chục đoạn
-// 400 ký tự, không bao giờ chạm ngưỡng 999. Muốn chia nhỏ hơn (vd để tránh
-// gửi 1 file quá dài, hay để nghe được đoạn đầu sớm hơn) thì giảm số này lại
-// (vd 10-15 sẽ ra file ~5-10 phút, hoặc 3 sẽ ra nhiều file ngắn ~1 phút).
+// (999) để mặc định GỘP CẢ CHƯƠNG thành 1 file duy nhất (ra 1 file 7-11
+// phút/chương giống trước đây). Muốn chia nhỏ hơn thì giảm số này lại.
 const TTS_GROUP_SIZE = 999;
 
 // File nhạc nền cố định dùng chung cho mọi truyện. Tự upload file mp3 và đặt
@@ -189,9 +179,8 @@ function stopAutoSession(threadID) {
 }
 
 // Cắt text thành các đoạn tối đa maxLen ký tự, ưu tiên cắt tại dấu câu.
-// VieNeu-TTS ở chế độ "Standard (Một lần)" cắt ngắn audio nếu text 1 lần gọi
-// quá dài, nên phải tự cắt nhỏ (~240 ký tự) và tự ghép nhiều đoạn lại.
-function splitTextForTTS(text, maxLen = 400) {
+// Google Translate TTS chỉ chấp nhận đoạn ngắn (~180-200 ký tự/request).
+function splitTextForTTS(text, maxLen = 180) {
   const chunks = [];
   let current = '';
   const parts = text.replace(/([.!?,;…])\s*/g, '$1|').split('|');
@@ -224,51 +213,26 @@ function splitTextForTTS(text, maxLen = 400) {
   return chunks;
 }
 
-// Chuyển 1 đoạn text thành buffer mp3/wav bằng VieNeu-TTS chạy trên Hugging
-// Face Space. Gọi qua @gradio/client tới endpoint /wrapper.
-//
-// LƯU Ý QUAN TRỌNG: /wrapper là hàm dạng "generator" - nó trả kết quả NHIỀU
-// LẦN trong lúc xử lý (để cập nhật % tiến độ trên giao diện web), chứ không
-// chỉ 1 lần duy nhất khi xong. Vì vậy phải dùng submit() + lặp qua toàn bộ sự
-// kiện, LUÔN GHI ĐÈ để giữ lại kết quả CUỐI CÙNG - không được dùng predict()
-// vì predict() chỉ lấy kết quả đầu tiên (audio sinh dở, chưa xong).
-async function vieneuTtsToBuffer(text) {
-  const client = await GradioClient.connect(VIENEU_HF_SPACE);
-
-  const submission = client.submit("/wrapper", {
-    param_0: text,               // nội dung cần đọc
-    param_1: VIENEU_VOICE,       // giọng preset (vd "Trúc Ly")
-    param_2: null,               // audio mẫu - không cần vì dùng giọng có sẵn
-    param_3: null,               // transcript audio mẫu - không cần
-    param_5: "Standard (Một lần)",
-    param_6: true,               // batch processing
-    param_7: 32,                 // batch size
-    param_8: 0.8,                // temperature
-    param_9: 256,                // max chars/chunk (server tự chia nội bộ)
-    param_10: VIENEU_STYLE,      // phong cách đọc
-    param_11: true               // denoise
-  });
-
-  let finalData = null;
-  for await (const msg of submission) {
-    // Chỉ quan tâm sự kiện "data" (kết quả trả về), bỏ qua "status"/"log"...
-    // Ghi đè mỗi lần nhận -> sau vòng lặp, finalData chắc chắn là lần cuối cùng.
-    if (msg.type === "data") {
-      finalData = msg.data;
+// Chuyển 1 đoạn text (ngắn, tối đa ~200 ký tự) thành buffer mp3 bằng endpoint
+// text-to-speech không chính thức của Google Translate. Endpoint này miễn phí,
+// không cần API key, nhưng giới hạn độ dài text mỗi request khá ngắn.
+async function googleTtsToBuffer(text) {
+  const response = await axios.get("https://translate.google.com/translate_tts", {
+    params: {
+      ie: "UTF-8",
+      q: text,
+      tl: TTS_LANG,
+      client: "tw-ob",
+      ttsspeed: TTS_SPEED
+    },
+    responseType: "arraybuffer",
+    timeout: 15000,
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+      "Referer": "https://translate.google.com/"
     }
-  }
-
-  if (!finalData || !finalData[0]) {
-    throw new Error("VieNeu-TTS không trả về audio nào (job không có dữ liệu 'data').");
-  }
-
-  const audioInfo = finalData[0];
-  // Client tự biết URL file thật của Space (không cần tự ghép URL thủ công
-  // như lúc dùng link tunnel Colab).
-  const audioUrl = audioInfo.url;
-
-  const audioResponse = await axios.get(audioUrl, { responseType: "arraybuffer", timeout: 60000 });
-  return Buffer.from(audioResponse.data);
+  });
+  return Buffer.from(response.data);
 }
 
 // Cào + chuyển 1 chương thành giọng nói rồi gửi vào thread.
@@ -350,7 +314,7 @@ async function fetchAndSendChapter({ api, threadID, messageID, storyName, slug, 
         let buffer = null;
         for (let attempt = 1; attempt <= MAX_RETRY; attempt++) {
           try {
-            buffer = await vieneuTtsToBuffer(textChunks[i]);
+            buffer = await googleTtsToBuffer(textChunks[i]);
             break; // thành công, thoát vòng retry
           } catch (err) {
             // Log đầy đủ lỗi thật (không chỉ err.message) để biết chính xác
@@ -388,7 +352,10 @@ async function fetchAndSendChapter({ api, threadID, messageID, storyName, slug, 
       const finalStream = require("stream").Readable.from(outputBuffer);
       finalStream.path = `${slug}-chuong-${chapterNum}-nhom-${g + 1}.mp3`;
 
-      const bodyText = `🎧 ${storyName.toUpperCase()} - Chương ${chapterNum} (Đoạn ${groupStart + 1}-${groupEnd}/${textChunks.length})`;
+      const groupFailedCount = (groupEnd - groupStart) - groupBuffers.length;
+      const bodyText = groupFailedCount > 0
+        ? `🎧 ${storyName.toUpperCase()} - Chương ${chapterNum} (${groupBuffers.length}/${groupEnd - groupStart} đoạn thành công trong khoảng ${groupStart + 1}-${groupEnd}/${textChunks.length} - ⚠️ ${groupFailedCount} đoạn lỗi, audio có thể thiếu/ngắn)`
+        : `🎧 ${storyName.toUpperCase()} - Chương ${chapterNum} (Đoạn ${groupStart + 1}-${groupEnd}/${textChunks.length})`;
 
       await new Promise((resolve) => {
         api.sendMessage({
@@ -411,7 +378,7 @@ async function fetchAndSendChapter({ api, threadID, messageID, storyName, slug, 
 
     if (successGroupCount === 0) {
       await cleanupStatusMessages(api, statusMessageIDs);
-      await api.sendMessage(`❌ Không tạo được audio nào cho chương này (VieNeu-TTS có thể đang gặp sự cố hoặc Space chưa khởi động xong). Vui lòng thử lại sau.`, threadID, replyID);
+      await api.sendMessage(`❌ Không tạo được audio nào cho chương này (Google TTS có thể đang gặp sự cố). Vui lòng thử lại sau.`, threadID, replyID);
       return "error";
     }
 
@@ -508,7 +475,7 @@ module.exports = {
     aliases: ["doctruyen tts"],
     version: "3.0",
     role: 0,
-    description: "Đọc truyện chữ bằng giọng nói VieNeu-TTS - Trúc Ly (Hỗ trợ truyện dài, tự động đọc tiếp)",
+    description: "Đọc truyện chữ bằng giọng nói Google TTS (Hỗ trợ truyện dài, tự động đọc tiếp)",
     usage: "truyentts <tên truyện> <số chương> | truyentts stop",
     category: "Giải trí"
   },
