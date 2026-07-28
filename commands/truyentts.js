@@ -11,7 +11,7 @@ ffmpeg.setFfmpegPath(ffmpegPath);
 // tl: mã ngôn ngữ Google Translate dùng để đọc ("vi" = tiếng Việt)
 const TTS_LANG = "vi";
 // ttsspeed: "1" tốc độ bình thường, có thể thử giá trị nhỏ hơn 1 để đọc chậm hơn
-const TTS_SPEED = "1";
+const TTS_SPEED = "1.5";
 // Google Translate TTS chỉ chấp nhận đoạn text ngắn (an toàn nhất là ~180-200 ký tự/request)
 const TTS_MAX_CHUNK_LEN = 180;
 // Số đoạn nhỏ được tải xong rồi mới ghép lại thành 1 file gửi đi. Đặt lớn
@@ -277,12 +277,31 @@ async function fetchAndSendChapter({ api, threadID, messageID, storyName, slug, 
 
     contentElement.querySelectorAll('div[id^="ads-"]').forEach(div => div.remove());
 
+    // Bỏ các dòng ghi công dịch giả/converter/editor/nguồn - xóa Ở CẤP NODE
+    // (không phải regex trên text đã dán phẳng), vì trang này không có ký tự
+    // xuống dòng thật trong nội dung -> nếu dùng regex ".*" không giới hạn sẽ
+    // ăn luôn từ "Dịch giả:" tới hết toàn bộ chương (đã từng bị lỗi này).
+    const CREDIT_LINE_PATTERN = /^(Dịch giả|Biên dịch|Convert(?:er)?|Editor|Beta|Nguồn(?:\s*dịch)?)\s*:/i;
+    Array.from(contentElement.childNodes).forEach(node => {
+      const t = (node.textContent || '').trim();
+      // Chỉ xóa nếu khớp pattern VÀ đoạn text đó ngắn (dưới 100 ký tự) -
+      // tránh trường hợp cả chương lọt vào chung 1 node rồi bị xóa nhầm.
+      if (t && t.length < 100 && CREDIT_LINE_PATTERN.test(t)) {
+        if (node.remove) {
+          node.remove();
+        } else if (node.parentNode) {
+          node.parentNode.removeChild(node);
+        }
+      }
+    });
+
     let content = contentElement.textContent.trim();
-    // Bỏ các dòng ghi công dịch giả/converter/editor/nguồn - thường nằm riêng
-    // 1 dòng ở đầu chương, không cần đọc ra khi chuyển giọng nói.
-    content = content.replace(/^\s*(Dịch giả|Biên dịch|Convert(?:er)?|Editor|Beta|Nguồn(?:\s*dịch)?)\s*:.*$/gim, '');
+    // Fallback dự phòng (giới hạn độ dài .{0,60} thay vì .* để không bao giờ
+    // ăn lan ra cả chương nếu lỡ có ký tự xuống dòng thật ở 1 số trang khác).
+    content = content.replace(/(Dịch giả|Biên dịch|Convert(?:er)?|Editor|Beta|Nguồn(?:\s*dịch)?)\s*:.{0,60}?(?=\.|,|\n|$)/gi, '');
     content = content.replace(/\n\s*\n/g, ". ").replace(/\s{2,}/g, ' ').trim();
     content = content.replace(/\*?\s*Chương này có nội dung ảnh[^.]*\./gi, '').trim();
+
 
     if (!content) {
       await cleanupStatusMessages(api, statusMessageIDs);
