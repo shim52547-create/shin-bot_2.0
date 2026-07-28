@@ -8,18 +8,17 @@ const ffmpegPath = require("@ffmpeg-installer/ffmpeg").path;
 const ffmpeg = require("fluent-ffmpeg");
 ffmpeg.setFfmpegPath(ffmpegPath);
 
-<<<<<<< HEAD
 // ==== CẤU HÌNH GIỌNG ĐỌC VIENEU-TTS (chạy trên Colab của chính bạn) ====
-// KHÔNG còn dùng Space public chung nữa (hay bị nghẽn/lỗi "Could not resolve
-// app config"). Giờ tự chạy VieNeu-TTS-v3-Turbo trên Google Colab (lệnh
-// `!uv run vieneu-web`), Gradio sẽ tự sinh 1 link public dạng
+// KHÔNG dùng Space public chung nữa (hay bị nghẽn/lỗi "Could not resolve
+// app config"). Tự chạy VieNeu-TTS trên Google Colab (lệnh `!uv run
+// vieneu-web`), Gradio sẽ tự sinh 1 link public dạng
 // "https://xxxxxxxx.gradio.live".
 //
 // ⚠️ QUAN TRỌNG: link này chỉ sống tối đa ~1 tuần VÀ sẽ mất ngay khi bạn tắt
 // tab/Colab bị ngắt session (free tier tự ngắt sau ~90 phút không tương tác).
 // Mỗi lần chạy lại Colab, bạn PHẢI lấy link "Running on public URL" mới và
 // cập nhật lại biến VIENEU_HF_SPACE bên dưới thì bot mới hoạt động tiếp được.
-const VIENEU_HF_SPACE = "https://bfbb5830bf487356c1.gradio.live"; // <-- đổi link này mỗi lần chạy lại Colab
+const VIENEU_HF_SPACE = "https://d2ab397da137f7ac4f.gradio.live"; // <-- đổi link này mỗi lần chạy lại Colab
 
 // Tên giọng đọc, phải khớp CHÍNH XÁC (kể cả dấu) với 1 giá trị trong dropdown
 // "Giọng mẫu" của giao diện Gradio. Mở link ở trên để xem danh sách đầy đủ.
@@ -31,26 +30,6 @@ const VIENEU_STYLE = "Kể chuyện";
 
 // Space/Colab này tự chia nhỏ text ở phía server qua tham số Max Chars per
 // Chunk, nhưng vẫn cắt nhỏ text ở phía bot trước để tránh 1 request quá dài.
-=======
-// ==== CẤU HÌNH GIỌNG ĐỌC VIENEU-TTS (Hugging Face Space - của tác giả gốc) ====
-// Dùng thẳng Space public của tác giả pnnbao97, KHÔNG cần deploy Space riêng.
-// Space ID lấy từ URL: huggingface.co/spaces/<VIENEU_HF_SPACE>
-// LƯU Ý: đây là Space CHUNG cho mọi người dùng, không do mình quản lý:
-//  - có thể bị chờ hàng đợi (queue) khi nhiều người cùng gọi
-//  - tác giả có thể sửa/tắt Space bất cứ lúc nào không báo trước
-//  - đã chuyển từ Space "VieNeu-TTS-v3-Turbo" (endpoint /synthesize) sang
-//    Space gốc "VieNeu-TTS" (endpoint /synthesize_speech) vì Space v3-Turbo
-//    bị lỗi "Could not resolve app config" (Space không phản hồi config khi
-//    kết nối - có thể do đang sleep/lỗi runtime/quá tải).
-const VIENEU_HF_SPACE = "pnnbao-ump/VieNeu-TTS";
-// Giọng có sẵn của Space này: 'Tuyên (nam miền Bắc)', 'Vĩnh (nam miền Nam)',
-// 'Bình (nam miền Bắc)', 'Đoan (nữ miền Nam)', 'Ngọc (nữ miền Bắc)',
-// 'Ly (nữ miền Bắc)'. Không còn giọng "Trúc Ly" như Space cũ -> chọn giọng
-// nữ miền Bắc gần nhất.
-const VIENEU_VOICE = "Ly (nữ miền Bắc)";
-// Space này không công bố giới hạn ký tự cứng cho mỗi lần gọi, nhưng vẫn cắt
-// nhỏ text ở phía bot để tránh 1 request quá dài (dễ timeout/audio bị lỗi).
->>>>>>> 09ff6da5f297f552fed01217fa33588bad5ee210
 const TTS_MAX_CHUNK_LEN = 400;
 
 // File nhạc nền cố định dùng chung cho mọi truyện. Tự upload file mp3 và đặt
@@ -249,7 +228,6 @@ function splitTextForTTS(text, maxLen = 3000) {
 }
 
 // Chuyển 1 đoạn text thành buffer mp3/wav bằng VieNeu-TTS, gọi qua
-<<<<<<< HEAD
 // @gradio/client tới app Gradio đang chạy trên Colab, endpoint "/wrapper".
 //
 // Thứ tự tham số của "/wrapper" (lấy từ trang "Use via API" của app):
@@ -280,18 +258,6 @@ async function vieneuTtsToBuffer(text) {
     VIENEU_STYLE,
     false
   ]);
-=======
-// @gradio/client tới Space Hugging Face của tác giả, endpoint /synthesize_speech.
-async function vieneuTtsToBuffer(text) {
-  const client = await GradioClient.connect(VIENEU_HF_SPACE);
-
-  const result = await client.predict("/synthesize_speech", {
-    text: text,
-    voice_choice: VIENEU_VOICE, // giọng preset, vd "Ly (nữ miền Bắc)"
-    custom_audio: null,          // không dùng nhân bản giọng, chỉ giọng preset
-    custom_text: null,
-  });
->>>>>>> 09ff6da5f297f552fed01217fa33588bad5ee210
 
   // "/wrapper" trả về 3 phần tử: [0] audio, [1] trạng thái, [2] thời gian ước tính.
   const audioInfo = result.data[0];
@@ -399,11 +365,7 @@ async function fetchAndSendChapter({ api, threadID, messageID, storyName, slug, 
         failedIndexes.push(i + 1);
       }
 
-<<<<<<< HEAD
       // Nghỉ ngắn giữa các lần gọi để tránh dồn dập request lên server TTS.
-=======
-      // Nghỉ ngắn giữa các lần gọi để tránh dồn dập request lên Space chung.
->>>>>>> 09ff6da5f297f552fed01217fa33588bad5ee210
       await sleep(randomDelay(500, 1000));
     }
 
