@@ -8,29 +8,23 @@ const ffmpegPath = require("@ffmpeg-installer/ffmpeg").path;
 const ffmpeg = require("fluent-ffmpeg");
 ffmpeg.setFfmpegPath(ffmpegPath);
 
-// ==== CẤU HÌNH GIỌNG ĐỌC VIENEU-TTS (chạy trên Colab của chính bạn) ====
-// KHÔNG dùng Space public chung nữa (hay bị nghẽn/lỗi "Could not resolve
-// app config"). Tự chạy VieNeu-TTS trên Google Colab (lệnh `!uv run
-// vieneu-web`), Gradio sẽ tự sinh 1 link public dạng
-// "https://xxxxxxxx.gradio.live".
-//
-// ⚠️ QUAN TRỌNG: link này chỉ sống tối đa ~1 tuần VÀ sẽ mất ngay khi bạn tắt
-// tab/Colab bị ngắt session (free tier tự ngắt sau ~90 phút không tương tác).
-// Mỗi lần chạy lại Colab, bạn PHẢI lấy link "Running on public URL" mới và
-// cập nhật lại biến VIENEU_HF_SPACE bên dưới thì bot mới hoạt động tiếp được.
-const VIENEU_HF_SPACE = "https://d2ab397da137f7ac4f.gradio.live"; // <-- đổi link này mỗi lần chạy lại Colab
-
-// Tên giọng đọc, phải khớp CHÍNH XÁC (kể cả dấu) với 1 giá trị trong dropdown
-// "Giọng mẫu" của giao diện Gradio. Mở link ở trên để xem danh sách đầy đủ.
+// ==== CẤU HÌNH GIỌNG ĐỌC VIENEU-TTS (chạy qua Hugging Face Space) ====
+// Sau khi chạy `gradio deploy` trong Colab (hoặc máy bạn) như đã hướng dẫn,
+// bạn sẽ có 1 Space cố định dạng "username/ten-space". Điền đúng chuỗi đó
+// vào đây - KHÔNG cần link dạng https://..., @gradio/client tự nhận diện và
+// kết nối tới Space đang chạy. URL này KHÔNG đổi qua thời gian như Colab.
+const VIENEU_HF_SPACE = "https://d2ab397da137f7ac4f.gradio.live"; // <-- URL Colab hiện tại (đổi mỗi lần restart)
 const VIENEU_VOICE = "Trúc Ly";
-
-// "Phong cách đọc" - xem dropdown "🎭 Phong cách đọc" trong UI để lấy đúng chữ.
-// "Kể chuyện" hợp với đọc truyện hơn "Tự nhiên" (dành cho hội thoại/chatbot).
-const VIENEU_STYLE = "Kể chuyện";
-
-// Space/Colab này tự chia nhỏ text ở phía server qua tham số Max Chars per
-// Chunk, nhưng vẫn cắt nhỏ text ở phía bot trước để tránh 1 request quá dài.
+const VIENEU_STYLE = "Kể chuyện"; // phong cách đọc, hợp để đọc truyện
+// VieNeu-TTS ở chế độ "Standard (Một lần)" sẽ CẮT NGẮN audio nếu nhét cả đoạn
+// text dài vào 1 lần gọi (giới hạn độ dài sinh audio mỗi lần gọi model). Vì
+// vậy phải tự cắt nhỏ và gọi nhiều lần - MỖI LẦN GỌI vẫn ngắn (400 ký tự) để
+// không bị cắt, nhưng sẽ GHÉP một nhóm lại rồi mới gửi (xem TTS_GROUP_SIZE).
 const TTS_MAX_CHUNK_LEN = 400;
+// Số đoạn nhỏ được tải xong rồi mới ghép lại thành 1 file gửi đi. Vd = 3
+// nghĩa là: tải xong đoạn 1,2,3 (đợi đủ cả 3) -> ghép -> gửi 1 tin nhắn,
+// rồi tiếp tục nhóm 4,5,6...
+const TTS_GROUP_SIZE = 3;
 
 // File nhạc nền cố định dùng chung cho mọi truyện. Tự upload file mp3 và đặt
 // đúng đường dẫn này (tạo thư mục assets/audio nếu chưa có). Nếu file không
@@ -192,9 +186,9 @@ function stopAutoSession(threadID) {
 }
 
 // Cắt text thành các đoạn tối đa maxLen ký tự, ưu tiên cắt tại dấu câu.
-// VieNeu-TTS tự chia nhỏ text ở phía server, nên có thể để đoạn dài hơn nhiều
-// so với Google TTS (mặc định 3000 ký tự/lần gọi API).
-function splitTextForTTS(text, maxLen = 3000) {
+// VieNeu-TTS ở chế độ "Standard (Một lần)" cắt ngắn audio nếu text 1 lần gọi
+// quá dài, nên phải tự cắt nhỏ (~240 ký tự) và tự ghép nhiều đoạn lại.
+function splitTextForTTS(text, maxLen = 400) {
   const chunks = [];
   let current = '';
   const parts = text.replace(/([.!?,;…])\s*/g, '$1|').split('|');
@@ -227,42 +221,29 @@ function splitTextForTTS(text, maxLen = 3000) {
   return chunks;
 }
 
-// Chuyển 1 đoạn text thành buffer mp3/wav bằng VieNeu-TTS, gọi qua
-// @gradio/client tới app Gradio đang chạy trên Colab, endpoint "/wrapper".
+// Chuyển 1 đoạn text thành buffer mp3/wav bằng VieNeu-TTS chạy trên Hugging
+// Face Space. Gọi qua @gradio/client tới endpoint /wrapper.
 //
 // LƯU Ý QUAN TRỌNG: /wrapper là hàm dạng "generator" - nó trả kết quả NHIỀU
 // LẦN trong lúc xử lý (để cập nhật % tiến độ trên giao diện web), chứ không
 // chỉ 1 lần duy nhất khi xong. Vì vậy phải dùng submit() + lặp qua toàn bộ sự
 // kiện, LUÔN GHI ĐÈ để giữ lại kết quả CUỐI CÙNG - không được dùng predict()
 // vì predict() chỉ lấy kết quả đầu tiên (audio sinh dở, chưa xong).
-//
-// Tham số gửi lên "/wrapper" (lấy từ trang "Use via API" của app):
-//   param_0  Văn bản              -> text cần đọc
-//   param_1  Giọng mẫu            -> VIENEU_VOICE
-//   param_2  Audio giọng mẫu      -> null (không dùng nhân bản giọng)
-//   param_3  Nội dung audio mẫu   -> null (không dùng vì không clone)
-//   param_5  Chế độ sinh          -> "Standard (Một lần)"
-//   param_6  Batch Processing     -> true
-//   param_7  Batch Size           -> 32
-//   param_8  Temperature          -> 0.8
-//   param_9  Max Chars per Chunk  -> TTS_MAX_CHUNK_LEN
-//   param_10 Phong cách đọc       -> VIENEU_STYLE ("Kể chuyện")
-//   param_11 Denoise audio mẫu    -> true
 async function vieneuTtsToBuffer(text) {
   const client = await GradioClient.connect(VIENEU_HF_SPACE);
 
   const submission = client.submit("/wrapper", {
-    param_0: text,
-    param_1: VIENEU_VOICE,
-    param_2: null,
-    param_3: null,
+    param_0: text,               // nội dung cần đọc
+    param_1: VIENEU_VOICE,       // giọng preset (vd "Trúc Ly")
+    param_2: null,               // audio mẫu - không cần vì dùng giọng có sẵn
+    param_3: null,               // transcript audio mẫu - không cần
     param_5: "Standard (Một lần)",
-    param_6: true,
-    param_7: 32,
-    param_8: 0.8,
-    param_9: TTS_MAX_CHUNK_LEN,
-    param_10: VIENEU_STYLE,
-    param_11: true
+    param_6: true,               // batch processing
+    param_7: 32,                 // batch size
+    param_8: 0.8,                // temperature
+    param_9: 256,                // max chars/chunk (server tự chia nội bộ)
+    param_10: VIENEU_STYLE,      // phong cách đọc
+    param_11: true               // denoise
   });
 
   let finalData = null;
@@ -279,15 +260,9 @@ async function vieneuTtsToBuffer(text) {
   }
 
   const audioInfo = finalData[0];
-  if (!audioInfo || (!audioInfo.url && !audioInfo.path)) {
-    throw new Error(`Không nhận được audio hợp lệ từ /wrapper. Raw data: ${safeStringify(finalData)}`);
-  }
-
-  // Với Space/Colab host qua Gradio, @gradio/client thường trả sẵn URL đầy đủ
-  // trong audioInfo.url. Chỉ fallback tự dựng URL khi thiếu (dùng root lấy từ
-  // config của client, không hardcode domain).
-  const baseUrl = (client.config && client.config.root) ? client.config.root : "";
-  const audioUrl = audioInfo.url || `${baseUrl}/gradio_api/file=${audioInfo.path}`;
+  // Client tự biết URL file thật của Space (không cần tự ghép URL thủ công
+  // như lúc dùng link tunnel Colab).
+  const audioUrl = audioInfo.url;
 
   const audioResponse = await axios.get(audioUrl, { responseType: "arraybuffer", timeout: 60000 });
   return Buffer.from(audioResponse.data);
@@ -345,86 +320,59 @@ async function fetchAndSendChapter({ api, threadID, messageID, storyName, slug, 
       return "empty";
     }
 
-    // 2. Cắt chữ thành các đoạn ngắn
+    // 2. Cắt chữ thành các đoạn ngắn (Google Translate TTS giới hạn độ dài text/request)
     const textChunks = splitTextForTTS(content, TTS_MAX_CHUNK_LEN);
 
     const loadingId2 = await sendTrackedMessage(
       api,
-      `🎙️ Bắt đầu đọc: ${storyName.toUpperCase()} - Chương ${chapterNum}\n📊 Tổng số đoạn âm thanh: ${textChunks.length} (Đang tải và ghép thành 1 file voice, có thể mất một lúc)...`,
+      `🎙️ Bắt đầu đọc: ${storyName.toUpperCase()} - Chương ${chapterNum}\n📊 Tổng số đoạn âm thanh: ${textChunks.length} (gộp mỗi ${TTS_GROUP_SIZE} đoạn thành 1 file trước khi gửi)...`,
       threadID
     );
     statusMessageIDs.push(loadingId2);
 
-    // 3. Tải toàn bộ âm thanh trước (để kiểm tra lỗi rồi mới gửi)
+    // 3. Sinh audio theo NHÓM (TTS_GROUP_SIZE đoạn) - tải xong đủ cả nhóm mới
+    // ghép lại thành 1 file rồi gửi, thay vì gửi từng đoạn nhỏ lẻ tẻ.
     const MAX_RETRY = 3;
-    const audioBuffers = [];
+    let successGroupCount = 0;
     const failedIndexes = [];
+    const totalGroups = Math.ceil(textChunks.length / TTS_GROUP_SIZE);
 
-    for (let i = 0; i < textChunks.length; i++) {
-      let buffer = null;
-      for (let attempt = 1; attempt <= MAX_RETRY; attempt++) {
-        try {
-          buffer = await vieneuTtsToBuffer(textChunks[i]);
-          break; // thành công, thoát vòng retry
-        } catch (err) {
-          // Log đầy đủ lỗi thật (không chỉ err.message) để biết chính xác
-          // nguyên nhân: timeout, connection reset, Colab đang bận/lỗi, v.v.
-          console.error(`Đoạn ${i + 1} lỗi (lần ${attempt}/${MAX_RETRY}): ${describeError(err)}`);
-          if (attempt < MAX_RETRY) {
-            await sleep(randomDelay(2000, 4000));
+    for (let g = 0; g < totalGroups; g++) {
+      const groupStart = g * TTS_GROUP_SIZE;
+      const groupEnd = Math.min(groupStart + TTS_GROUP_SIZE, textChunks.length);
+      const groupBuffers = [];
+
+      // Tải TUẦN TỰ từng đoạn trong nhóm, đợi đoạn trước xong mới qua đoạn sau.
+      for (let i = groupStart; i < groupEnd; i++) {
+        let buffer = null;
+        for (let attempt = 1; attempt <= MAX_RETRY; attempt++) {
+          try {
+            buffer = await vieneuTtsToBuffer(textChunks[i]);
+            break; // thành công, thoát vòng retry
+          } catch (err) {
+            // Log đầy đủ lỗi thật (không chỉ err.message) để biết chính xác
+            // nguyên nhân: timeout, connection reset, Space đang ngủ/khởi động, v.v.
+            console.error(`Đoạn ${i + 1} lỗi (lần ${attempt}/${MAX_RETRY}): ${describeError(err)}`);
+            if (attempt < MAX_RETRY) {
+              await sleep(randomDelay(2000, 4000));
+            }
           }
+        }
+
+        if (buffer) {
+          groupBuffers.push(buffer);
+        } else {
+          failedIndexes.push(i + 1);
         }
       }
 
-      if (buffer) {
-        audioBuffers.push(buffer);
-      } else {
-        audioBuffers.push(null);
-        failedIndexes.push(i + 1);
+      if (groupBuffers.length === 0) {
+        // Cả nhóm đều lỗi, không có gì để ghép/gửi - qua nhóm tiếp theo.
+        continue;
       }
 
-      // Nghỉ ngắn giữa các lần gọi để tránh dồn dập request lên server TTS.
-      await sleep(randomDelay(500, 1000));
-    }
-
-    if (audioBuffers.every(b => b === null)) {
-      await cleanupStatusMessages(api, statusMessageIDs);
-      await api.sendMessage(`❌ Không tải được âm thanh cho chương này (server VieNeu-TTS trên Colab có thể đang bận, đã bị ngắt session, hoặc link "gradio.live" đã hết hạn - cần chạy lại Colab và cập nhật link mới trong code). Vui lòng thử lại sau.`, threadID, replyID);
-      return "error";
-    }
-
-    if (failedIndexes.length > 0) {
-      api.sendMessage(`⚠️ ${failedIndexes.length}/${textChunks.length} đoạn tải âm thanh thất bại sau ${MAX_RETRY} lần thử, sẽ bị bỏ qua (đoạn số: ${failedIndexes.slice(0, 20).join(', ')}${failedIndexes.length > 20 ? '...' : ''}).`, threadID);
-    }
-
-    // 4. GHÉP ÂM THANH THÀNH CÁC FILE MP3, TỰ CẮT PHẦN KHI GẦN CHẠM GIỚI HẠN DUNG LƯỢNG
-    const validBuffers = audioBuffers.filter(b => b !== null);
-
-    if (validBuffers.length === 0) {
-      await cleanupStatusMessages(api, statusMessageIDs);
-      await api.sendMessage(`❌ Không có đoạn âm thanh nào tải thành công.`, threadID, replyID);
-      return "error";
-    }
-
-    const MAX_PART_BYTES = 24 * 1024 * 1024;
-
-    const parts = [];
-    let currentPart = [];
-    let currentSize = 0;
-
-    for (const buffer of validBuffers) {
-      if (currentSize + buffer.length > MAX_PART_BYTES && currentPart.length > 0) {
-        parts.push(currentPart);
-        currentPart = [];
-        currentSize = 0;
-      }
-      currentPart.push(buffer);
-      currentSize += buffer.length;
-    }
-    if (currentPart.length > 0) parts.push(currentPart);
-
-    for (let p = 0; p < parts.length; p++) {
-      const mergedBuffer = Buffer.concat(parts[p]);
+      // Ghép các đoạn trong nhóm lại thành 1 file
+      const mergedBuffer = Buffer.concat(groupBuffers);
 
       let outputBuffer = mergedBuffer;
       try {
@@ -435,12 +383,9 @@ async function fetchAndSendChapter({ api, threadID, messageID, storyName, slug, 
       }
 
       const finalStream = require("stream").Readable.from(outputBuffer);
-      const partLabel = parts.length > 1 ? `-phan-${p + 1}` : '';
-      finalStream.path = `${slug}-chuong-${chapterNum}${partLabel}.mp3`;
+      finalStream.path = `${slug}-chuong-${chapterNum}-nhom-${g + 1}.mp3`;
 
-      const bodyText = parts.length > 1
-        ? `🎧 ${storyName.toUpperCase()} - Chương ${chapterNum} (Phần ${p + 1}/${parts.length})`
-        : `🎧 ${storyName.toUpperCase()} - Chương ${chapterNum} (${validBuffers.length}/${textChunks.length} đoạn)`;
+      const bodyText = `🎧 ${storyName.toUpperCase()} - Chương ${chapterNum} (Đoạn ${groupStart + 1}-${groupEnd}/${textChunks.length})`;
 
       await new Promise((resolve) => {
         api.sendMessage({
@@ -448,16 +393,27 @@ async function fetchAndSendChapter({ api, threadID, messageID, storyName, slug, 
           attachment: finalStream
         }, threadID, (err) => {
           if (err) {
-            console.error(`Lỗi gửi file voice phần ${p + 1}:`, describeError(err));
-            api.sendMessage(`❌ Gửi file voice phần ${p + 1} thất bại: ${err.message || describeError(err)}`, threadID, replyID);
+            console.error(`Lỗi gửi voice nhóm ${g + 1}:`, describeError(err));
+            api.sendMessage(`❌ Gửi voice đoạn ${groupStart + 1}-${groupEnd} thất bại: ${err.message || describeError(err)}`, threadID, replyID);
+          } else {
+            successGroupCount++;
           }
           resolve();
         });
       });
 
-      if (p < parts.length - 1) {
-        await sleep(randomDelay(2000, 3500));
-      }
+      // Nghỉ ngắn giữa các lần gửi để tránh gửi dồn dập
+      await sleep(randomDelay(1000, 2000));
+    }
+
+    if (successGroupCount === 0) {
+      await cleanupStatusMessages(api, statusMessageIDs);
+      await api.sendMessage(`❌ Không tạo được audio nào cho chương này (VieNeu-TTS có thể đang gặp sự cố hoặc Space chưa khởi động xong). Vui lòng thử lại sau.`, threadID, replyID);
+      return "error";
+    }
+
+    if (failedIndexes.length > 0) {
+      api.sendMessage(`⚠️ ${failedIndexes.length}/${textChunks.length} đoạn tải âm thanh thất bại sau ${MAX_RETRY} lần thử, đã bỏ qua (đoạn số: ${failedIndexes.slice(0, 20).join(', ')}${failedIndexes.length > 20 ? '...' : ''}).`, threadID);
     }
 
     await cleanupStatusMessages(api, statusMessageIDs);
@@ -547,9 +503,9 @@ module.exports = {
   config: {
     name: "truyentts",
     aliases: ["doctruyen tts"],
-    version: "3.1",
+    version: "3.0",
     role: 0,
-    description: "Đọc truyện chữ bằng giọng nói VieNeu-TTS (Hỗ trợ truyện dài, tự động đọc tiếp)",
+    description: "Đọc truyện chữ bằng giọng nói VieNeu-TTS - Trúc Ly (Hỗ trợ truyện dài, tự động đọc tiếp)",
     usage: "truyentts <tên truyện> <số chương> | truyentts stop",
     category: "Giải trí"
   },
