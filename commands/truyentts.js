@@ -278,6 +278,9 @@ async function fetchAndSendChapter({ api, threadID, messageID, storyName, slug, 
     contentElement.querySelectorAll('div[id^="ads-"]').forEach(div => div.remove());
 
     let content = contentElement.textContent.trim();
+    // Bỏ các dòng ghi công dịch giả/converter/editor/nguồn - thường nằm riêng
+    // 1 dòng ở đầu chương, không cần đọc ra khi chuyển giọng nói.
+    content = content.replace(/^\s*(Dịch giả|Biên dịch|Convert(?:er)?|Editor|Beta|Nguồn(?:\s*dịch)?)\s*:.*$/gim, '');
     content = content.replace(/\n\s*\n/g, ". ").replace(/\s{2,}/g, ' ').trim();
     content = content.replace(/\*?\s*Chương này có nội dung ảnh[^.]*\./gi, '').trim();
 
