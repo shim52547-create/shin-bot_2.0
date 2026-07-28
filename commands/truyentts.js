@@ -230,39 +230,57 @@ function splitTextForTTS(text, maxLen = 3000) {
 // Chuyển 1 đoạn text thành buffer mp3/wav bằng VieNeu-TTS, gọi qua
 // @gradio/client tới app Gradio đang chạy trên Colab, endpoint "/wrapper".
 //
-// Thứ tự tham số của "/wrapper" (lấy từ trang "Use via API" của app):
-//   [0] Văn bản              -> text cần đọc
-//   [1] Giọng mẫu            -> VIENEU_VOICE
-//   [2] Audio giọng mẫu      -> null (không dùng nhân bản giọng)
-//   [3] Nội dung audio mẫu   -> "" (không dùng vì không clone)
-//   [4] Chế độ sinh          -> "Standard (Một lần)"
-//   [5] Batch Processing     -> false (đọc tuần tự từng đoạn)
-//   [6] Batch Size           -> 1
-//   [7] Temperature          -> 0.3 (ổn định, ít random)
-//   [8] Max Chars per Chunk  -> TTS_MAX_CHUNK_LEN
-//   [9] Phong cách đọc       -> VIENEU_STYLE ("Kể chuyện")
-//   [10] Denoise audio mẫu   -> false
+// LƯU Ý QUAN TRỌNG: /wrapper là hàm dạng "generator" - nó trả kết quả NHIỀU
+// LẦN trong lúc xử lý (để cập nhật % tiến độ trên giao diện web), chứ không
+// chỉ 1 lần duy nhất khi xong. Vì vậy phải dùng submit() + lặp qua toàn bộ sự
+// kiện, LUÔN GHI ĐÈ để giữ lại kết quả CUỐI CÙNG - không được dùng predict()
+// vì predict() chỉ lấy kết quả đầu tiên (audio sinh dở, chưa xong).
+//
+// Tham số gửi lên "/wrapper" (lấy từ trang "Use via API" của app):
+//   param_0  Văn bản              -> text cần đọc
+//   param_1  Giọng mẫu            -> VIENEU_VOICE
+//   param_2  Audio giọng mẫu      -> null (không dùng nhân bản giọng)
+//   param_3  Nội dung audio mẫu   -> null (không dùng vì không clone)
+//   param_5  Chế độ sinh          -> "Standard (Một lần)"
+//   param_6  Batch Processing     -> true
+//   param_7  Batch Size           -> 32
+//   param_8  Temperature          -> 0.8
+//   param_9  Max Chars per Chunk  -> TTS_MAX_CHUNK_LEN
+//   param_10 Phong cách đọc       -> VIENEU_STYLE ("Kể chuyện")
+//   param_11 Denoise audio mẫu    -> true
 async function vieneuTtsToBuffer(text) {
   const client = await GradioClient.connect(VIENEU_HF_SPACE);
 
-  const result = await client.predict("/wrapper", [
-    text,
-    VIENEU_VOICE,
-    null,
-    "",
-    "Standard (Một lần)",
-    false,
-    1,
-    0.3,
-    TTS_MAX_CHUNK_LEN,
-    VIENEU_STYLE,
-    false
-  ]);
+  const submission = client.submit("/wrapper", {
+    param_0: text,
+    param_1: VIENEU_VOICE,
+    param_2: null,
+    param_3: null,
+    param_5: "Standard (Một lần)",
+    param_6: true,
+    param_7: 32,
+    param_8: 0.8,
+    param_9: TTS_MAX_CHUNK_LEN,
+    param_10: VIENEU_STYLE,
+    param_11: true
+  });
 
-  // "/wrapper" trả về 3 phần tử: [0] audio, [1] trạng thái, [2] thời gian ước tính.
-  const audioInfo = result.data[0];
+  let finalData = null;
+  for await (const msg of submission) {
+    // Chỉ quan tâm sự kiện "data" (kết quả trả về), bỏ qua "status"/"log"...
+    // Ghi đè mỗi lần nhận -> sau vòng lặp, finalData chắc chắn là lần cuối cùng.
+    if (msg.type === "data") {
+      finalData = msg.data;
+    }
+  }
+
+  if (!finalData || !finalData[0]) {
+    throw new Error("VieNeu-TTS không trả về audio nào (job không có dữ liệu 'data').");
+  }
+
+  const audioInfo = finalData[0];
   if (!audioInfo || (!audioInfo.url && !audioInfo.path)) {
-    throw new Error(`Không nhận được audio hợp lệ từ /wrapper. Raw data: ${safeStringify(result.data)}`);
+    throw new Error(`Không nhận được audio hợp lệ từ /wrapper. Raw data: ${safeStringify(finalData)}`);
   }
 
   // Với Space/Colab host qua Gradio, @gradio/client thường trả sẵn URL đầy đủ
