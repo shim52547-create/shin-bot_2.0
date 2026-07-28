@@ -21,10 +21,13 @@ const VIENEU_STYLE = "Kể chuyện"; // phong cách đọc, hợp để đọc 
 // vậy phải tự cắt nhỏ và gọi nhiều lần - MỖI LẦN GỌI vẫn ngắn (400 ký tự) để
 // không bị cắt, nhưng sẽ GHÉP một nhóm lại rồi mới gửi (xem TTS_GROUP_SIZE).
 const TTS_MAX_CHUNK_LEN = 400;
-// Số đoạn nhỏ được tải xong rồi mới ghép lại thành 1 file gửi đi. Vd = 3
-// nghĩa là: tải xong đoạn 1,2,3 (đợi đủ cả 3) -> ghép -> gửi 1 tin nhắn,
-// rồi tiếp tục nhóm 4,5,6...
-const TTS_GROUP_SIZE = 3;
+// Số đoạn nhỏ được tải xong rồi mới ghép lại thành 1 file gửi đi. Đặt lớn
+// (999) để mặc định GỘP CẢ CHƯƠNG thành 1 file duy nhất (giống hành vi cũ,
+// ra 1 file 7-11 phút/chương) - vì mỗi chương thường chỉ có vài chục đoạn
+// 400 ký tự, không bao giờ chạm ngưỡng 999. Muốn chia nhỏ hơn (vd để tránh
+// gửi 1 file quá dài, hay để nghe được đoạn đầu sớm hơn) thì giảm số này lại
+// (vd 10-15 sẽ ra file ~5-10 phút, hoặc 3 sẽ ra nhiều file ngắn ~1 phút).
+const TTS_GROUP_SIZE = 999;
 
 // File nhạc nền cố định dùng chung cho mọi truyện. Tự upload file mp3 và đặt
 // đúng đường dẫn này (tạo thư mục assets/audio nếu chưa có). Nếu file không
