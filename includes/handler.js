@@ -43,9 +43,23 @@ module.exports = function ({ api }) {
       }
 
       if (!body.startsWith(prefix)) {
-        // Không phải lệnh có prefix -> vẫn cho các lệnh có onChat (vd: game bài cào) xử lý tin nhắn thường
+        // Nhóm đang khoá bot (lockBot) -> chặn luôn các lệnh onChat (game bài cào, nối từ...) với thành viên thường.
+        // antitag vẫn luôn chạy vì đây là tính năng chống spam bảo vệ nhóm, không phải lệnh cho thành viên "dùng".
+        let allowOnChatForEveryone = true;
+        if (threadData.lockBot) {
+          const isAdminBot = global.config.ADMIN_BOT.includes(event.senderID);
+          if (!isAdminBot) {
+            const threadInfo = await api.getThreadInfo(threadID).catch(() => null);
+            const isGroupAdmin = threadInfo?.adminIDs?.some(a => a.id === event.senderID);
+            allowOnChatForEveryone = !!isGroupAdmin;
+          } else {
+            allowOnChatForEveryone = true;
+          }
+        }
+
         for (const command of global.client.commands.values()) {
           if (typeof command.onChat !== "function") continue;
+          if (!allowOnChatForEveryone && command.config.name !== "antitag") continue;
           try {
             await command.onChat({ api, event, Threads, Users });
           } catch (err) {
@@ -66,7 +80,12 @@ module.exports = function ({ api }) {
       if (!command) return;
 
       // Kiểm tra quyền: 0 = ai cũng dùng được, 1 = quản trị viên nhóm, 2 = admin bot
-      const role = command.config.role || 0;
+      let role = command.config.role || 0;
+
+      // Nhóm đang bật "lockbot" (chỉ QTV/admin bot được dùng bot) -> nâng mọi lệnh role 0 lên role 1
+      if (role === 0 && threadData.lockBot && command.config.name !== "lockbot") {
+        role = 1;
+      }
 
       // Nhóm bị cấm dùng bot -> chặn mọi lệnh, trừ lệnh admin bot (role 2, vd "thread unban")
       if (role < 2 && ThreadBan.isBanned(threadID)) return;
