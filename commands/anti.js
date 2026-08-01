@@ -107,8 +107,7 @@ module.exports = {
       return api.sendMessage(`❎ Lỗi khi bật anti ${type}: ${e.message}`, threadID, messageID);
     }
 
-    data.anti = anti;
-    await Threads.setData(String(threadID), { data });
+    Threads.set(threadID, { anti });
     return api.sendMessage(`☑️ Bật thành công chế độ anti ${type} (${LABELS[type]}).`, threadID, messageID);
   }
 };
