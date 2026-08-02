@@ -1,6 +1,13 @@
 const { spawn } = require("child_process");
 const http = require("http");
+const dns = require("dns");
 const logger = require("./utils/log");
+
+// Ưu tiên phân giải IPv4 trước IPv6 — nhiều host (vd Render) không có route IPv6
+// ổn định ra ngoài, khiến các request tới Facebook bị ETIMEDOUT/ENETUNREACH.
+if (typeof dns.setDefaultResultOrder === "function") {
+  dns.setDefaultResultOrder("ipv4first");
+}
 
 // Ghi cookies.txt từ biến môi trường YT_COOKIE (nếu có) — thay cho entrypoint.sh
 // bản Docker cũ. An toàn khi chạy nhiều lần / không có biến môi trường.

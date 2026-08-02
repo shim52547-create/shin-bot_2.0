@@ -1,8 +1,15 @@
 const fs = require("fs-extra");
 const path = require("path");
+const dns = require("dns");
 const moment = require("moment-timezone");
 const login = require("@dongdev/fca-unofficial");
 const logger = require("./utils/log");
+
+// Ưu tiên phân giải IPv4 trước IPv6 — khắc phục ETIMEDOUT/ENETUNREACH khi gọi
+// getThreadList và các API khác của Facebook trên host thiếu route IPv6 ổn định.
+if (typeof dns.setDefaultResultOrder === "function") {
+  dns.setDefaultResultOrder("ipv4first");
+}
 const { MessageCount } = require("./utils/messageCount");
 const { Rent } = require("./utils/rent");
 
@@ -251,6 +258,17 @@ function scheduleRentJob(api) {
 }
 
 
+// Số lần đã thử đăng nhập lại do lỗi MẠNG (timeout/unreachable) — không tính lỗi
+// sai cookie/appstate. Dùng backoff tăng dần, tối đa LOGIN_RETRY_MAX_DELAY.
+let loginNetworkRetryCount = 0;
+const LOGIN_RETRY_BASE_DELAY = 5000; // 5s
+const LOGIN_RETRY_MAX_DELAY = 2 * 60 * 1000; // 2 phút
+
+function isNetworkError(err) {
+  const msg = JSON.stringify(err || {});
+  return /ETIMEDOUT|ENETUNREACH|ECONNRESET|ECONNREFUSED|EAI_AGAIN/.test(msg);
+}
+
 function start() {
   loadCommands();
   loadEvents();
@@ -260,8 +278,30 @@ function start() {
   login({ appState }, (err, api) => {
     if (err) {
       logger.error(`Đăng nhập thất bại: ${JSON.stringify(err)}`, "LOGIN");
+
+      // Lỗi mạng (ETIMEDOUT/ENETUNREACH...) thường là tạm thời (host chưa kết nối
+      // được tới Facebook) — thử lại tại chỗ với backoff thay vì thoát tiến trình
+      // ngay, để tránh tốn hết lượt restart của supervisor trong index.js.
+      if (isNetworkError(err)) {
+        loginNetworkRetryCount++;
+        const delay = Math.min(
+          LOGIN_RETRY_BASE_DELAY * loginNetworkRetryCount,
+          LOGIN_RETRY_MAX_DELAY
+        );
+        logger.warn(
+          `Lỗi mạng khi đăng nhập (lần ${loginNetworkRetryCount}). Thử lại sau ${Math.round(delay / 1000)}s...`,
+          "LOGIN"
+        );
+        setTimeout(start, delay);
+        return;
+      }
+
+      // Các lỗi khác (cookie hết hạn, sai appstate...) thì thoát để supervisor
+      // trong index.js xử lý / báo rõ ràng, tránh vòng lặp thử lại vô ích.
       return process.exit(1);
     }
+
+    loginNetworkRetryCount = 0;
 
     api.setOptions(global.config.FCAOption || {});
     global.client.api = api;
