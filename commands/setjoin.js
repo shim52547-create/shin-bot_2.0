@@ -14,7 +14,8 @@ function gifPath(threadID) {
 const PLACEHOLDER_HELP =
   "Các biến dùng được trong nội dung:\n" +
   "{name} → tên thành viên mới\n" +
-  "{threadName} → tên nhóm";
+  "{threadName} → tên nhóm\n" +
+  "{count} → thành viên thứ mấy của nhóm";
 
 module.exports = {
   config: {
@@ -62,7 +63,8 @@ module.exports = {
 
       const preview = msg
         .replace(/\{name\}/g, "Nguyễn Văn A")
-        .replace(/\{threadName\}/g, "Tên nhóm mẫu");
+        .replace(/\{threadName\}/g, "Tên nhóm mẫu")
+        .replace(/\{count\}/g, "42");
 
       return api.sendMessage(`✅ Đã lưu lời chào mới! Preview:\n${preview}`, threadID, messageID);
     }

@@ -37,22 +37,31 @@ module.exports = {
     if (author !== botID && logMessageData?.addedParticipants) {
       const threadData = Threads.get(threadID);
       let threadName = "";
+      let totalMember = 0;
       if (threadData.customJoin) {
         try {
-          threadName = (await api.getThreadInfo(threadID))?.threadName || "";
-        } catch (e) { /* bỏ qua, để trống tên nhóm nếu không lấy được */ }
+          const info = await api.getThreadInfo(threadID);
+          threadName = info?.threadName || "";
+          totalMember = info?.participantIDs?.length || 0;
+        } catch (e) { /* bỏ qua, để trống tên nhóm/số tv nếu không lấy được */ }
       }
 
       const gifPath = path.join(GIF_DIR, `${threadID}.gif`);
       const hasGif = fs.existsSync(gifPath);
 
-      for (const user of logMessageData.addedParticipants) {
-        if (user.userFbId === botID) continue;
+      // Nếu 1 lần có nhiều người vào cùng lúc, đánh số thứ tự tăng dần
+      // (người đầu tiên trong danh sách sẽ là thành viên "cũ" nhất trong đợt này).
+      const newMembers = logMessageData.addedParticipants.filter(u => u.userFbId !== botID);
+
+      newMembers.forEach((user, idx) => {
+        // Thứ hạng thành viên = tổng số tv hiện tại - số người vào cùng đợt + vị trí trong đợt
+        const rank = totalMember ? totalMember - newMembers.length + idx + 1 : 0;
 
         const body = threadData.customJoin
           ? threadData.customJoin
               .replace(/\{name\}/g, user.fullName || "bạn")
               .replace(/\{threadName\}/g, threadName || "nhóm")
+              .replace(/\{count\}/g, rank || "?")
           : `👋 Chào mừng ${user.fullName || "bạn"} đã tham gia nhóm!`;
 
         if (hasGif) {
@@ -60,7 +69,7 @@ module.exports = {
         } else {
           api.sendMessage(body, threadID);
         }
-      }
+      });
     }
   }
 };
