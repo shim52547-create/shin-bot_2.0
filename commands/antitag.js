@@ -1,10 +1,12 @@
+const KICK_AFTER = 3; // Quá 3 lần nhắc nhở -> kick thẳng ở lần vi phạm thứ 4
+
 module.exports = {
   config: {
     name: "antitag",
     aliases: ["antitagall"],
-    version: "1.1",
+    version: "1.2",
     role: 1, // quản trị viên nhóm hoặc admin bot
-    description: "Bật/tắt chống spam tag hàng loạt (tag @all), tự cảnh cáo người vi phạm",
+    description: "Bật/tắt chống spam tag hàng loạt (tag @all), cảnh cáo và tự kick nếu vi phạm quá 3 lần",
     usage: "antitag on/off | antitag limit <số người>",
     category: "Box chat"
   },
@@ -13,7 +15,7 @@ module.exports = {
     const { threadID, messageID } = event;
     const threadData = Threads.get(threadID);
     const anti = threadData.anti || {};
-    const cfg = anti.tagall || { enabled: false, limit: 5 };
+    const cfg = anti.tagall || { enabled: false, limit: 5, violations: {} };
 
     const action = (args[0] || "").toLowerCase();
 
@@ -33,7 +35,8 @@ module.exports = {
 
     return api.sendMessage(
       `✅ Đã ${turnOn ? "bật" : "tắt"} chống spam tag hàng loạt (tag @all).\n` +
-      `╰─ Ngưỡng phát hiện: ${anti.tagall.limit || 5} người được tag / tin nhắn (chỉ cảnh cáo, không kick)`,
+      `╰─ Ngưỡng phát hiện: ${anti.tagall.limit || 5} người được tag / tin nhắn\n` +
+      `╰─ Vi phạm quá ${KICK_AFTER} lần (từ lần thứ ${KICK_AFTER + 1}) sẽ bị kick khỏi nhóm`,
       threadID, messageID
     );
   },
@@ -60,8 +63,37 @@ module.exports = {
       if (threadInfo?.adminIDs?.some(a => a.id === senderID)) return;
     } catch (_) {}
 
+    // Đếm số lần vi phạm của người này trong nhóm
+    const anti = threadData.anti || {};
+    const tagall = anti.tagall || { enabled: true, limit };
+    const violations = { ...(tagall.violations || {}) };
+    const count = (violations[senderID] || 0) + 1;
+    violations[senderID] = count;
+    anti.tagall = { ...tagall, violations };
+    Threads.set(threadID, { anti });
+
+    // Vượt quá số lần cho phép -> kick thẳng
+    if (count > KICK_AFTER) {
+      delete violations[senderID];
+      anti.tagall = { ...tagall, violations };
+      Threads.set(threadID, { anti });
+
+      try {
+        await api.sendMessage(
+          `🚫 Đã cảnh cáo ${KICK_AFTER} lần nhưng vẫn tiếp tục spam tag hàng loạt (${mentionCount} người) -> kick khỏi nhóm.`,
+          threadID
+        );
+        await api.removeUserFromGroup(senderID, threadID);
+      } catch (e) {
+        api.sendMessage("❌ Không thể kick người vi phạm (có thể do bot chưa là quản trị viên nhóm).", threadID);
+      }
+      return;
+    }
+
     return api.sendMessage(
-      `⚠️ Phát hiện tag hàng loạt (${mentionCount} người)! Vui lòng không spam tag/tag @all trong nhóm.`,
+      `⚠️ Cảnh cáo (${count}/${KICK_AFTER}): Phát hiện tag hàng loạt (${mentionCount} người)! ` +
+      `Vui lòng không spam tag/tag @all trong nhóm.\n` +
+      `╰─ Vi phạm quá ${KICK_AFTER} lần sẽ bị kick khỏi nhóm.`,
       threadID
     );
   }
