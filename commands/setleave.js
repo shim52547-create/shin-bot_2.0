@@ -1,3 +1,15 @@
+const fs = require("fs-extra");
+const path = require("path");
+const axios = require("axios");
+
+// Thư mục lưu gif tiễn biệt riêng theo từng nhóm (1 file <threadID>.gif).
+const GIF_DIR = path.join(__dirname, "..", "events", "cache", "leaveGif");
+fs.ensureDirSync(GIF_DIR);
+
+function gifPath(threadID) {
+  return path.join(GIF_DIR, `${threadID}.gif`);
+}
+
 const PLACEHOLDER_HELP =
   "Các biến dùng được trong nội dung:\n" +
   "{name} → tên thành viên vừa rời/bị kick\n" +
@@ -8,13 +20,14 @@ module.exports = {
   config: {
     name: "setleave",
     aliases: ["leavenoti", "outnoti"],
-    version: "2.0",
+    version: "3.0",
     role: 1, // quản trị viên nhóm (hoặc admin bot)
-    description: "Bật/tắt và tuỳ chỉnh thông báo khi có thành viên rời/bị kick khỏi nhóm",
+    description: "Bật/tắt và tuỳ chỉnh text/gif thông báo khi có thành viên rời/bị kick khỏi nhóm",
     usage:
       "setleave on/off\n" +
       "setleave xem\n" +
-      "setleave text <nội dung> | setleave text remove",
+      "setleave text <nội dung> | setleave text remove\n" +
+      "setleave gif <url ảnh .gif> | setleave gif remove",
     category: "Quản trị nhóm"
   },
   run: async ({ api, event, args, Threads }) => {
@@ -22,7 +35,7 @@ module.exports = {
     const sub = (args[0] || "").toLowerCase();
     const threadData = Threads.get(threadID);
 
-    // ---------- setleave on/off (giữ nguyên hành vi cũ) ----------
+    // ---------- setleave on/off ----------
     if (sub === "on" || sub === "off") {
       const turnOn = sub === "on";
       Threads.set(threadID, { leaveNotify: turnOn });
@@ -32,7 +45,7 @@ module.exports = {
       );
     }
 
-    // ---------- setleave (không kèm gì) -> toggle nhanh, giữ hành vi cũ ----------
+    // ---------- setleave (không kèm gì) -> toggle nhanh ----------
     if (!sub) {
       const current = threadData.leaveNotify !== false;
       const turnOn = !current;
@@ -50,7 +63,8 @@ module.exports = {
         `🔔 Thông báo rời nhóm hiện đang: ${enabled ? "BẬT" : "TẮT"}`,
         threadData.customLeave
           ? `📝 Nội dung tuỳ chỉnh:\n${threadData.customLeave}`
-          : "📝 Đang dùng lời thông báo mặc định."
+          : "📝 Đang dùng lời thông báo mặc định.",
+        fs.existsSync(gifPath(threadID)) ? "🎞️ Nhóm này đã có gif tiễn biệt." : "🎞️ Nhóm này chưa có gif tiễn biệt."
       ];
       return api.sendMessage(`${lines.join("\n")}\n\n${PLACEHOLDER_HELP}`, threadID, messageID);
     }
@@ -76,6 +90,36 @@ module.exports = {
         .replace(/\{count\}/g, "41");
 
       return api.sendMessage(`✅ Đã lưu nội dung thông báo mới! Preview:\n${preview}`, threadID, messageID);
+    }
+
+    // ---------- setleave gif ... ----------
+    if (sub === "gif") {
+      const msg = args.slice(1).join(" ");
+      const pathGif = gifPath(threadID);
+
+      if (msg === "remove") {
+        if (!fs.existsSync(pathGif)) {
+          return api.sendMessage("⚠️ Nhóm của bạn chưa từng cài gif tiễn biệt.", threadID, messageID);
+        }
+        fs.unlinkSync(pathGif);
+        return api.sendMessage("✅ Đã gỡ bỏ gif tiễn biệt của nhóm.", threadID, messageID);
+      }
+
+      if (!/^https?:\/\/\S+\.gif(\?\S*)?$/i.test(msg)) {
+        return api.sendMessage("⚠️ URL không hợp lệ, cần là link ảnh đuôi .gif.\nDùng: setleave gif <url>", threadID, messageID);
+      }
+
+      try {
+        const res = await axios.get(msg, { responseType: "arraybuffer", timeout: 20000 });
+        fs.writeFileSync(pathGif, Buffer.from(res.data));
+      } catch (e) {
+        return api.sendMessage("❌ Không tải được file, url không tồn tại hoặc bot gặp lỗi mạng.", threadID, messageID);
+      }
+
+      return api.sendMessage(
+        { body: "✅ Đã lưu gif tiễn biệt của nhóm, preview:", attachment: fs.createReadStream(pathGif) },
+        threadID, messageID
+      );
     }
 
     return api.sendMessage(
